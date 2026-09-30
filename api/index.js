@@ -5,7 +5,7 @@ const https = require('https');
 const SPREADSHEET_ID = process.env.SPREADSHEET_ID || '1n4feZRy9p0pEhApto8BdNsQLSU0-92WHdsT44Ob9Zzc';
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '8093638286:AAHslkVd7Y3KBDiNseWM703Kyih2ycF1Yxs';
 const AUTHORIZED_CHAT_ID = process.env.AUTHORIZED_CHAT_ID || '499900380';
-const SHEET_TAB_NAME = 'Schedule';
+const DEFAULT_SHEET_TAB = 'Schedule';
 
 // Helper to authenticate with Google Sheets API
 function getSheetsClient() {
@@ -55,6 +55,24 @@ function getSheetsClient() {
     });
   }
   return google.sheets({ version: 'v4', auth });
+}
+
+// Dynamically resolve target sheet tab name and sheet ID
+async function resolveSheetDetails(sheets) {
+  try {
+    const spreadsheet = await sheets.spreadsheets.get({ spreadsheetId: SPREADSHEET_ID });
+    const sheetList = spreadsheet.data.sheets || [];
+    
+    // Match 'Schedule' or fallback to first sheet tab
+    const matchedSheet = sheetList.find(s => s.properties.title.trim().toLowerCase() === DEFAULT_SHEET_TAB.toLowerCase()) || sheetList[0];
+    
+    return {
+      title: matchedSheet.properties.title,
+      sheetId: matchedSheet.properties.sheetId
+    };
+  } catch (e) {
+    return { title: DEFAULT_SHEET_TAB, sheetId: 0 };
+  }
 }
 
 // Telegram Message Sender Helper
@@ -164,9 +182,10 @@ async function handleTelegramCommand(chatId, text) {
   try {
     if (command === '/check') {
       const sheets = getSheetsClient();
+      const sheetDetails = await resolveSheetDetails(sheets);
       const response = await sheets.spreadsheets.values.get({
         spreadsheetId: SPREADSHEET_ID,
-        range: `${SHEET_TAB_NAME}!A1:G`
+        range: `'${sheetDetails.title}'!A1:G`
       });
 
       const rows = response.data.values || [];
@@ -178,7 +197,7 @@ async function handleTelegramCommand(chatId, text) {
         }
       }
 
-      const msg = `📊 *TCR Class Scheduler Bot*\n\n*System is online.* There are *${pendingCount}* pending classes in the sheet waiting for dispatch.`;
+      const msg = `📊 *TCR Class Scheduler Bot*\n\n*System is online.* There are *${pendingCount}* pending classes in tab \`${sheetDetails.title}\` waiting for dispatch.`;
       await sendTelegramMessage(chatId, msg);
       return;
     }
@@ -212,9 +231,10 @@ async function handleTelegramCommand(chatId, text) {
 
 async function handleListCommand(chatId, filterText) {
   const sheets = getSheetsClient();
+  const sheetDetails = await resolveSheetDetails(sheets);
   const response = await sheets.spreadsheets.values.get({
     spreadsheetId: SPREADSHEET_ID,
-    range: `${SHEET_TAB_NAME}!A1:G`
+    range: `'${sheetDetails.title}'!A1:G`
   });
 
   const rows = response.data.values || [];
@@ -293,9 +313,10 @@ async function handleCreateCommand(chatId, argsStr) {
   const facultyVal = parts[5];
 
   const sheets = getSheetsClient();
+  const sheetDetails = await resolveSheetDetails(sheets);
   const appendRes = await sheets.spreadsheets.values.append({
     spreadsheetId: SPREADSHEET_ID,
-    range: `${SHEET_TAB_NAME}!A:G`,
+    range: `'${sheetDetails.title}'!A:G`,
     valueInputOption: 'USER_ENTERED',
     requestBody: {
       values: [[dateVal, timeVal, centerVal, courseVal, subjectVal, facultyVal, '']]
@@ -326,6 +347,7 @@ async function handleUpdateCommand(chatId, argsStr) {
   const restStr = argsStr.substring(spaceIndex).trim();
 
   const sheets = getSheetsClient();
+  const sheetDetails = await resolveSheetDetails(sheets);
 
   if (isNaN(rowNum) || rowNum <= 1) {
     await sendTelegramMessage(chatId, `❌ Invalid Row Number \`${rowNumStr}\`. Must be row index 2 or higher.`);
@@ -338,7 +360,7 @@ async function handleUpdateCommand(chatId, argsStr) {
     if (parts.length >= 6) {
       await sheets.spreadsheets.values.update({
         spreadsheetId: SPREADSHEET_ID,
-        range: `${SHEET_TAB_NAME}!A${rowNum}:G${rowNum}`,
+        range: `'${sheetDetails.title}'!A${rowNum}:G${rowNum}`,
         valueInputOption: 'USER_ENTERED',
         requestBody: {
           values: [[parts[0], parts[1], parts[2], parts[3], parts[4], parts[5], '']]
@@ -377,7 +399,7 @@ async function handleUpdateCommand(chatId, argsStr) {
 
   await sheets.spreadsheets.values.update({
     spreadsheetId: SPREADSHEET_ID,
-    range: `${SHEET_TAB_NAME}!${colLetter}${rowNum}`,
+    range: `'${sheetDetails.title}'!${colLetter}${rowNum}`,
     valueInputOption: 'USER_ENTERED',
     requestBody: {
       values: [[newValue]]
@@ -388,7 +410,7 @@ async function handleUpdateCommand(chatId, argsStr) {
   if (fieldName !== 'status') {
     await sheets.spreadsheets.values.update({
       spreadsheetId: SPREADSHEET_ID,
-      range: `${SHEET_TAB_NAME}!G${rowNum}`,
+      range: `'${sheetDetails.title}'!G${rowNum}`,
       valueInputOption: 'USER_ENTERED',
       requestBody: {
         values: [['']]
@@ -412,10 +434,7 @@ async function handleDeleteCommand(chatId, argsStr) {
   }
 
   const sheets = getSheetsClient();
-  
-  const spreadsheet = await sheets.spreadsheets.get({ spreadsheetId: SPREADSHEET_ID });
-  const sheetObj = spreadsheet.data.sheets.find(s => s.properties.title === SHEET_TAB_NAME) || spreadsheet.data.sheets[0];
-  const sheetId = sheetObj.properties.sheetId;
+  const sheetDetails = await resolveSheetDetails(sheets);
 
   await sheets.spreadsheets.batchUpdate({
     spreadsheetId: SPREADSHEET_ID,
@@ -423,7 +442,7 @@ async function handleDeleteCommand(chatId, argsStr) {
       requests: [{
         deleteDimension: {
           range: {
-            sheetId: sheetId,
+            sheetId: sheetDetails.sheetId,
             dimension: 'ROWS',
             startIndex: rowNum - 1,
             endIndex: rowNum

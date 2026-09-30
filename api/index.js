@@ -13,8 +13,19 @@ function getSheetsClient() {
   if (process.env.GOOGLE_SERVICE_ACCOUNT_KEY) {
     let rawKey = process.env.GOOGLE_SERVICE_ACCOUNT_KEY.trim();
     
+    // Remove wrapping quotes if present
+    if ((rawKey.startsWith('"') && rawKey.endsWith('"')) || (rawKey.startsWith("'") && rawKey.endsWith("'"))) {
+      rawKey = rawKey.substring(1, rawKey.length - 1).trim();
+    }
+
+    // Extract JSON object if trailing junk or extra characters exist
+    const jsonMatch = rawKey.match(/\{[\s\S]*\}/);
+    if (jsonMatch) {
+      rawKey = jsonMatch[0];
+    }
+
     // Parse JSON credentials
-    let credentials = typeof rawKey === 'string' ? JSON.parse(rawKey) : rawKey;
+    let credentials = JSON.parse(rawKey);
 
     // Handle escaped newlines in private_key if minified string passed
     if (credentials.private_key && typeof credentials.private_key === 'string') {

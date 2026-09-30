@@ -1,0 +1,13 @@
+{
+  "name": "tcr-telegram-scheduler-bot",
+  "version": "1.0.0",
+  "description": "Telegram Bot for TCR Class Scheduler integrated with Google Sheets and Vercel",
+  "main": "api/index.js",
+  "scripts": {
+    "start": "node api/index.js",
+    "test": "node test.js"
+  },
+  "dependencies": {
+    "googleapis": "^144.0.0"
+  }
+}

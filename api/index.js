@@ -11,7 +11,16 @@ const SHEET_TAB_NAME = 'Schedule';
 function getSheetsClient() {
   let auth;
   if (process.env.GOOGLE_SERVICE_ACCOUNT_KEY) {
-    const credentials = JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT_KEY);
+    let rawKey = process.env.GOOGLE_SERVICE_ACCOUNT_KEY.trim();
+    
+    // Parse JSON credentials
+    let credentials = typeof rawKey === 'string' ? JSON.parse(rawKey) : rawKey;
+
+    // Handle escaped newlines in private_key if minified string passed
+    if (credentials.private_key && typeof credentials.private_key === 'string') {
+      credentials.private_key = credentials.private_key.replace(/\\n/g, '\n');
+    }
+
     auth = new google.auth.GoogleAuth({
       credentials,
       scopes: ['https://www.googleapis.com/auth/spreadsheets']
@@ -128,48 +137,53 @@ async function handleTelegramCommand(chatId, text) {
     return;
   }
 
-  if (command === '/check') {
-    const sheets = getSheetsClient();
-    const response = await sheets.spreadsheets.values.get({
-      spreadsheetId: SPREADSHEET_ID,
-      range: `${SHEET_TAB_NAME}!A1:G`
-    });
+  try {
+    if (command === '/check') {
+      const sheets = getSheetsClient();
+      const response = await sheets.spreadsheets.values.get({
+        spreadsheetId: SPREADSHEET_ID,
+        range: `${SHEET_TAB_NAME}!A1:G`
+      });
 
-    const rows = response.data.values || [];
-    let pendingCount = 0;
+      const rows = response.data.values || [];
+      let pendingCount = 0;
 
-    for (let i = 1; i < rows.length; i++) {
-      if (rows[i][0] && String(rows[i][6] || '').trim() !== 'SENT') {
-        pendingCount++;
+      for (let i = 1; i < rows.length; i++) {
+        if (rows[i][0] && String(rows[i][6] || '').trim() !== 'SENT') {
+          pendingCount++;
+        }
       }
+
+      const msg = `📊 *TCR Class Scheduler Bot*\n\n*System is online.* There are *${pendingCount}* pending classes in the sheet waiting for dispatch.`;
+      await sendTelegramMessage(chatId, msg);
+      return;
     }
 
-    const msg = `📊 *TCR Class Scheduler Bot*\n\n*System is online.* There are *${pendingCount}* pending classes in the sheet waiting for dispatch.`;
-    await sendTelegramMessage(chatId, msg);
-    return;
-  }
+    if (command === '/list') {
+      await handleListCommand(chatId, argsStr);
+      return;
+    }
 
-  if (command === '/list') {
-    await handleListCommand(chatId, argsStr);
-    return;
-  }
+    if (command === '/create' || command === '/add') {
+      await handleCreateCommand(chatId, argsStr);
+      return;
+    }
 
-  if (command === '/create' || command === '/add') {
-    await handleCreateCommand(chatId, argsStr);
-    return;
-  }
+    if (command === '/update') {
+      await handleUpdateCommand(chatId, argsStr);
+      return;
+    }
 
-  if (command === '/update') {
-    await handleUpdateCommand(chatId, argsStr);
-    return;
-  }
+    if (command === '/delete') {
+      await handleDeleteCommand(chatId, argsStr);
+      return;
+    }
 
-  if (command === '/delete') {
-    await handleDeleteCommand(chatId, argsStr);
-    return;
+    await sendTelegramMessage(chatId, `⚠️ Unknown command. Type /help to see all available commands.`);
+  } catch (err) {
+    console.error('Command Execution Error:', err);
+    await sendTelegramMessage(chatId, `⚠️ *Google Sheets API Error:* \`${err.message}\`\n\n_Please check that your Service Account email is shared on the Google Sheet as Editor._`);
   }
-
-  await sendTelegramMessage(chatId, `⚠️ Unknown command. Type /help to see all available commands.`);
 }
 
 async function handleListCommand(chatId, filterText) {

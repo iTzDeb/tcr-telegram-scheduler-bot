@@ -13,21 +13,34 @@ function getSheetsClient() {
   if (process.env.GOOGLE_SERVICE_ACCOUNT_KEY) {
     let rawKey = process.env.GOOGLE_SERVICE_ACCOUNT_KEY.trim();
     
-    // Remove wrapping quotes if present
+    // Step 1: Base64 decode if passed as base64 string
+    if (!rawKey.startsWith('{') && !rawKey.startsWith('"') && !rawKey.startsWith("'")) {
+      try {
+        const decoded = Buffer.from(rawKey, 'base64').toString('utf8');
+        if (decoded.includes('{')) {
+          rawKey = decoded.trim();
+        }
+      } catch (e) {
+        console.error('Base64 decode attempt failed:', e.message);
+      }
+    }
+
+    // Step 2: Strip surrounding quotes if present
     if ((rawKey.startsWith('"') && rawKey.endsWith('"')) || (rawKey.startsWith("'") && rawKey.endsWith("'"))) {
       rawKey = rawKey.substring(1, rawKey.length - 1).trim();
     }
 
-    // Extract JSON object if trailing junk or extra characters exist
-    const jsonMatch = rawKey.match(/\{[\s\S]*\}/);
-    if (jsonMatch) {
-      rawKey = jsonMatch[0];
+    // Step 3: Extract valid JSON substring from first '{' to last '}'
+    const firstBrace = rawKey.indexOf('{');
+    const lastBrace = rawKey.lastIndexOf('}');
+    if (firstBrace !== -1 && lastBrace > firstBrace) {
+      rawKey = rawKey.substring(firstBrace, lastBrace + 1);
     }
 
-    // Parse JSON credentials
+    // Step 4: Parse JSON
     let credentials = JSON.parse(rawKey);
 
-    // Handle escaped newlines in private_key if minified string passed
+    // Step 5: Format newlines in private_key
     if (credentials.private_key && typeof credentials.private_key === 'string') {
       credentials.private_key = credentials.private_key.replace(/\\n/g, '\n');
     }

@@ -113,6 +113,44 @@ function isAuthorized(chatId, userId) {
   return strChatId === String(AUTHORIZED_CHAT_ID) || strUserId === String(AUTHORIZED_CHAT_ID);
 }
 
+// Helper to normalize search/filter text and row data for fuzzy date and boundary matching
+function normalizeText(text) {
+  if (!text) return '';
+  return text
+    .toLowerCase()
+    .replace(/\bseptember\b|\bsept\b/g, 'sep')
+    .replace(/\boctober\b/g, 'oct')
+    .replace(/\bjanuary\b/g, 'jan')
+    .replace(/\bfebruary\b/g, 'feb')
+    .replace(/\bmarch\b/g, 'mar')
+    .replace(/\bapril\b/g, 'apr')
+    .replace(/\bjune\b/g, 'jun')
+    .replace(/\bjuly\b/g, 'jul')
+    .replace(/\baugust\b/g, 'aug')
+    .replace(/\bnovember\b/g, 'nov')
+    .replace(/\bdecember\b/g, 'dec')
+    // Strip leading zeros from day numbers / numeric tokens (e.g., "01" -> "1", "06" -> "6")
+    .replace(/\b0([1-9])\b/g, '$1');
+}
+
+function matchesFilter(rowText, filterText) {
+  const normRow = normalizeText(rowText);
+  const normFilter = normalizeText(filterText);
+  if (!normFilter) return true;
+
+  const tokens = normFilter.split(/\s+/).filter(Boolean);
+
+  return tokens.every(token => {
+    const escaped = token.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&');
+    if (/^[a-z0-9]+$/i.test(token)) {
+      const regex = new RegExp('\\b' + escaped + '\\b', 'i');
+      return regex.test(normRow);
+    } else {
+      return normRow.includes(token);
+    }
+  });
+}
+
 // Vercel Serverless Entry Point
 module.exports = async (req, res) => {
   if (req.method !== 'POST') {
@@ -243,7 +281,6 @@ async function handleListCommand(chatId, filterText) {
     return;
   }
 
-  const filter = filterText.toLowerCase().trim();
   const matchingRows = [];
 
   for (let i = 1; i < rows.length; i++) {
@@ -258,9 +295,9 @@ async function handleListCommand(chatId, filterText) {
     const facultyStr = String(row[5] || '').trim();
     const statusStr = String(row[6] || '').trim();
 
-    const fullRowText = `${dateStr} ${timeStr} ${centerStr} ${courseStr} ${subjectStr} ${facultyStr} ${statusStr}`.toLowerCase();
+    const fullRowText = `${dateStr} ${timeStr} ${centerStr} ${courseStr} ${subjectStr} ${facultyStr} ${statusStr}`;
 
-    if (!filter || fullRowText.includes(filter)) {
+    if (!filterText || matchesFilter(fullRowText, filterText)) {
       matchingRows.push({
         rowNum: i + 1,
         date: dateStr,
@@ -279,7 +316,7 @@ async function handleListCommand(chatId, filterText) {
     return;
   }
 
-  let message = filter ? `📅 *Classes matching "${filterText}"* (${matchingRows.length}):\n\n` : `📅 *Master Class Schedule* (${matchingRows.length} classes):\n\n`;
+  let message = filterText ? `📅 *Classes matching "${filterText}"* (${matchingRows.length}):\n\n` : `📅 *Master Class Schedule* (${matchingRows.length} classes):\n\n`;
 
   matchingRows.forEach(item => {
     const statusBadge = item.status === 'SENT' ? ' `[SENT]`' : '';
@@ -454,3 +491,7 @@ async function handleDeleteCommand(chatId, argsStr) {
 
   await sendTelegramMessage(chatId, `🗑️ *Class Row ${rowNum} Deleted Successfully!*`);
 }
+
+// Export internal functions for unit testing
+module.exports._normalizeText = normalizeText;
+module.exports._matchesFilter = matchesFilter;

@@ -133,111 +133,22 @@ function normalizeText(text) {
     .replace(/\b0([1-9])\b/g, '$1');
 }
 
-function matchesFilter(dateStr, fullRowText, filterText) {
-  const normDate = normalizeText(dateStr);
+function matchesFilter(rowText, filterText) {
+  const normRow = normalizeText(rowText);
   const normFilter = normalizeText(filterText);
   if (!normFilter) return true;
 
   const tokens = normFilter.split(/\s+/).filter(Boolean);
-  const monthTokens = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'];
-  const hasMonthToken = tokens.some(t => monthTokens.includes(t));
-
-  // If filter contains month name (e.g. "oct"), match date strictly against dateStr
-  if (hasMonthToken) {
-    return tokens.every(token => {
-      const escaped = token.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&');
-      const regex = new RegExp('\\b' + escaped + '\\b', 'i');
-      return regex.test(normDate);
-    });
-  }
-
-  // General query (e.g. "Laxmi Nagar" or "CLAT")
-  const normRow = normalizeText(fullRowText);
-  if (normRow.includes(normFilter)) return true;
 
   return tokens.every(token => {
     const escaped = token.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&');
     if (/^[a-z0-9]+$/i.test(token)) {
       const regex = new RegExp('\\b' + escaped + '\\b', 'i');
       return regex.test(normRow);
+    } else {
+      return normRow.includes(token);
     }
-    return normRow.includes(token);
   });
-}
-
-// Helper to parse flexible create input (pipe, comma, newline, key-value)
-function parseCreateArgs(argsStr) {
-  if (!argsStr) return null;
-
-  // 1. Pipe separated
-  if (argsStr.includes('|')) {
-    const parts = argsStr.split('|').map(s => s.trim());
-    if (parts.length >= 6) {
-      return {
-        date: parts[0],
-        time: parts[1],
-        center: parts[2],
-        course: parts[3],
-        subject: parts[4],
-        faculty: parts[5]
-      };
-    }
-  }
-
-  // 2. Multi-line (newlines)
-  if (argsStr.includes('\n')) {
-    const lines = argsStr.split('\n').map(s => s.trim()).filter(Boolean);
-
-    // Check Key-Value syntax (e.g. "Date: 06 Sept 2026")
-    const kv = {};
-    lines.forEach(line => {
-      const idx = line.indexOf(':');
-      if (idx !== -1) {
-        const key = line.substring(0, idx).trim().toLowerCase();
-        const val = line.substring(idx + 1).trim();
-        kv[key] = val;
-      }
-    });
-
-    if (kv.date || kv.time || kv.center || kv.course || kv.subject || kv.faculty) {
-      return {
-        date: kv.date || kv.dt || '',
-        time: kv.time || kv.tm || '',
-        center: kv.center || kv.centre || kv.loc || kv.location || '',
-        course: kv.course || kv.batch || '',
-        subject: kv.subject || kv.sub || '',
-        faculty: kv.faculty || kv.teacher || kv.sir || kv.maam || ''
-      };
-    }
-
-    if (lines.length >= 6) {
-      return {
-        date: lines[0],
-        time: lines[1],
-        center: lines[2],
-        course: lines[3],
-        subject: lines[4],
-        faculty: lines[5]
-      };
-    }
-  }
-
-  // 3. Comma separated
-  if (argsStr.includes(',')) {
-    const parts = argsStr.split(',').map(s => s.trim());
-    if (parts.length >= 6) {
-      return {
-        date: parts[0],
-        time: parts[1],
-        center: parts[2],
-        course: parts[3],
-        subject: parts[4],
-        faculty: parts[5]
-      };
-    }
-  }
-
-  return null;
 }
 
 // Vercel Serverless Entry Point
@@ -391,7 +302,7 @@ async function handleListCommand(chatId, filterText) {
 
     const fullRowText = `${dateStr} ${timeStr} ${centerStr} ${courseStr} ${subjectStr} ${facultyStr} ${statusStr}`;
 
-    if (!filterText || matchesFilter(dateStr, fullRowText, filterText)) {
+    if (!filterText || matchesFilter(fullRowText, filterText)) {
       matchingRows.push({
         rowNum: i + 1,
         date: dateStr,
@@ -611,4 +522,3 @@ async function handleDeleteCommand(chatId, argsStr) {
 // Export internal functions for unit testing
 module.exports._normalizeText = normalizeText;
 module.exports._matchesFilter = matchesFilter;
-module.exports._parseCreateArgs = parseCreateArgs;

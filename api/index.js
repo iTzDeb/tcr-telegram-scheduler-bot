@@ -7,169 +7,8 @@ const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '8093638286:AAHslkV
 const AUTHORIZED_CHAT_ID = process.env.AUTHORIZED_CHAT_ID || '499900380';
 const DEFAULT_SHEET_TAB = 'Schedule';
 
-// Helper to authenticate with Google Auth (Sheets & Calendar)
-function getGoogleAuth() {
-  let auth;
-  if (process.env.GOOGLE_SERVICE_ACCOUNT_KEY) {
-    let rawKey = process.env.GOOGLE_SERVICE_ACCOUNT_KEY.trim();
-    
-    // Step 1: Base64 decode if passed as base64 string
-    if (!rawKey.startsWith('{') && !rawKey.startsWith('"') && !rawKey.startsWith("'")) {
-      try {
-        const decoded = Buffer.from(rawKey, 'base64').toString('utf8');
-        if (decoded.includes('{')) {
-          rawKey = decoded.trim();
-        }
-      } catch (e) {
-        console.error('Base64 decode attempt failed:', e.message);
-      }
-    }
+// --- Utility & Date Parsing Helpers (Defined at Top Level) ---
 
-    // Step 2: Strip surrounding quotes if present
-    if ((rawKey.startsWith('"') && rawKey.endsWith('"')) || (rawKey.startsWith("'") && rawKey.endsWith("'"))) {
-      rawKey = rawKey.substring(1, rawKey.length - 1).trim();
-    }
-
-    // Step 3: Extract valid JSON substring from first '{' to last '}'
-    const firstBrace = rawKey.indexOf('{');
-    const lastBrace = rawKey.lastIndexOf('}');
-    if (firstBrace !== -1 && lastBrace > firstBrace) {
-      rawKey = rawKey.substring(firstBrace, lastBrace + 1);
-    }
-
-    // Step 4: Parse JSON
-    let credentials = JSON.parse(rawKey);
-
-    // Step 5: Format newlines in private_key
-    if (credentials.private_key && typeof credentials.private_key === 'string') {
-      credentials.private_key = credentials.private_key.replace(/\\n/g, '\n');
-    }
-
-    auth = new google.auth.GoogleAuth({
-      credentials,
-      scopes: [
-        'https://www.googleapis.com/auth/spreadsheets',
-        'https://www.googleapis.com/auth/calendar'
-      ]
-    });
-  } else {
-    auth = new google.auth.GoogleAuth({
-      scopes: [
-        'https://www.googleapis.com/auth/spreadsheets',
-        'https://www.googleapis.com/auth/calendar'
-      ]
-    });
-  }
-  return auth;
-}
-
-function getSheetsClient() {
-  const auth = getGoogleAuth();
-  return google.sheets({ version: 'v4', auth });
-}
-
-function getCalendarClient() {
-  const auth = getGoogleAuth();
-  return google.calendar({ version: 'v3', auth });
-}
-
-// Function to automatically sync class to Google Calendar
-async function createCalendarEvent({ dateStr, timeStr, center, course, subject, faculty }) {
-  const calendarId = process.env.GOOGLE_CALENDAR_ID || 'primary';
-  try {
-    const calendar = getCalendarClient();
-    const dateVal = parseDateStrToVal(dateStr);
-    if (!dateVal) return null;
-
-    const startMinutes = parseStartTimeToMinutes(timeStr);
-    const startDate = new Date(dateVal);
-    startDate.setUTCHours(Math.floor(startMinutes / 60), startMinutes % 60, 0, 0);
-
-    // Default duration 2 hours
-    const endDate = new Date(startDate.getTime() + 2 * 60 * 60 * 1000);
-
-    const summary = `${course} - ${subject} (${faculty}) @ ${center}`;
-    const description = `Class Schedule: ${course} - ${subject}\nFaculty: ${faculty}\nCenter: ${center}\nTime: ${timeStr}`;
-
-    const res = await calendar.events.insert({
-      calendarId: calendarId,
-      requestBody: {
-        summary: summary,
-        location: center,
-        description: description,
-        start: {
-          dateTime: startDate.toISOString(),
-        },
-        end: {
-          dateTime: endDate.toISOString(),
-        },
-      },
-    });
-
-    return res.data;
-  } catch (err) {
-    console.error('Google Calendar Sync Error:', err.message);
-    return null;
-  }
-}
-
-// Dynamically resolve target sheet tab name and sheet ID
-async function resolveSheetDetails(sheets) {
-  try {
-    const spreadsheet = await sheets.spreadsheets.get({ spreadsheetId: SPREADSHEET_ID });
-    const sheetList = spreadsheet.data.sheets || [];
-    
-    // Match 'Schedule' or fallback to first sheet tab
-    const matchedSheet = sheetList.find(s => s.properties.title.trim().toLowerCase() === DEFAULT_SHEET_TAB.toLowerCase()) || sheetList[0];
-    
-    return {
-      title: matchedSheet.properties.title,
-      sheetId: matchedSheet.properties.sheetId
-    };
-  } catch (e) {
-    return { title: DEFAULT_SHEET_TAB, sheetId: 0 };
-  }
-}
-
-// Telegram Message Sender Helper
-function sendTelegramMessage(chatId, text, parseMode = 'Markdown') {
-  return new Promise((resolve, reject) => {
-    const data = JSON.stringify({
-      chat_id: chatId,
-      text: text,
-      parse_mode: parseMode
-    });
-
-    const options = {
-      hostname: 'api.telegram.org',
-      port: 443,
-      path: `/bot${TELEGRAM_BOT_TOKEN}/sendMessage`,
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Content-Length': Buffer.byteLength(data)
-      }
-    };
-
-    const req = https.request(options, (res) => {
-      let body = '';
-      res.on('data', chunk => body += chunk);
-      res.on('end', () => resolve(body));
-    });
-
-    req.on('error', (e) => reject(e));
-    req.write(data);
-    req.end();
-  });
-}
-
-function isAuthorized(chatId, userId) {
-  const strChatId = String(chatId);
-  const strUserId = String(userId || '');
-  return strChatId === String(AUTHORIZED_CHAT_ID) || strUserId === String(AUTHORIZED_CHAT_ID);
-}
-
-// Helper to normalize search/filter text and row data for fuzzy date and boundary matching
 function normalizeText(text) {
   if (!text) return '';
   return text
@@ -221,7 +60,6 @@ function matchesFilter(dateStr, fullRowText, filterText) {
   });
 }
 
-// Helpers for Chronological Sorting & Insertion
 function parseDateStrToVal(dateStr) {
   if (!dateStr) return 0;
   // Clean string and strip ordinal suffixes like 1st, 2nd, 3rd, 4th
@@ -336,7 +174,6 @@ function findInsertionRowIndex(existingRows, newDateVal, newTimeVal) {
   return existingRows.length + 1; // Append at end if after all existing dates
 }
 
-// Helper to parse flexible create input (pipe, comma, newline, key-value)
 function parseCreateArgs(argsStr) {
   if (!argsStr) return null;
 
@@ -409,6 +246,168 @@ function parseCreateArgs(argsStr) {
   }
 
   return null;
+}
+
+// Helper to authenticate with Google Auth (Sheets & Calendar)
+function getGoogleAuth() {
+  let auth;
+  if (process.env.GOOGLE_SERVICE_ACCOUNT_KEY) {
+    let rawKey = process.env.GOOGLE_SERVICE_ACCOUNT_KEY.trim();
+
+    // Step 1: Base64 decode if passed as base64 string
+    if (!rawKey.startsWith('{') && !rawKey.startsWith('"') && !rawKey.startsWith("'")) {
+      try {
+        const decoded = Buffer.from(rawKey, 'base64').toString('utf8');
+        if (decoded.includes('{')) {
+          rawKey = decoded.trim();
+        }
+      } catch (e) {
+        console.error('Base64 decode attempt failed:', e.message);
+      }
+    }
+
+    // Step 2: Strip surrounding quotes if present
+    if ((rawKey.startsWith('"') && rawKey.endsWith('"')) || (rawKey.startsWith("'") && rawKey.endsWith("'"))) {
+      rawKey = rawKey.substring(1, rawKey.length - 1).trim();
+    }
+
+    // Step 3: Extract valid JSON substring from first '{' to last '}'
+    const firstBrace = rawKey.indexOf('{');
+    const lastBrace = rawKey.lastIndexOf('}');
+    if (firstBrace !== -1 && lastBrace > firstBrace) {
+      rawKey = rawKey.substring(firstBrace, lastBrace + 1);
+    }
+
+    // Step 4: Parse JSON
+    let credentials = JSON.parse(rawKey);
+
+    // Step 5: Format newlines in private_key
+    if (credentials.private_key && typeof credentials.private_key === 'string') {
+      credentials.private_key = credentials.private_key.replace(/\\n/g, '\n');
+    }
+
+    auth = new google.auth.GoogleAuth({
+      credentials,
+      scopes: [
+        'https://www.googleapis.com/auth/spreadsheets',
+        'https://www.googleapis.com/auth/calendar'
+      ]
+    });
+  } else {
+    auth = new google.auth.GoogleAuth({
+      scopes: [
+        'https://www.googleapis.com/auth/spreadsheets',
+        'https://www.googleapis.com/auth/calendar'
+      ]
+    });
+  }
+  return auth;
+}
+
+function getSheetsClient() {
+  const auth = getGoogleAuth();
+  return google.sheets({ version: 'v4', auth });
+}
+
+function getCalendarClient() {
+  const auth = getGoogleAuth();
+  return google.calendar({ version: 'v3', auth });
+}
+
+// Function to automatically sync class to Google Calendar
+async function createCalendarEvent({ dateStr, timeStr, center, course, subject, faculty }) {
+  const calendarId = process.env.GOOGLE_CALENDAR_ID || 'primary';
+  try {
+    const calendar = getCalendarClient();
+    const dateVal = parseDateStrToVal(dateStr);
+    if (!dateVal) return null;
+
+    const startMinutes = parseStartTimeToMinutes(timeStr);
+    const startDate = new Date(dateVal);
+    startDate.setUTCHours(Math.floor(startMinutes / 60), startMinutes % 60, 0, 0);
+
+    // Default duration 2 hours
+    const endDate = new Date(startDate.getTime() + 2 * 60 * 60 * 1000);
+
+    const summary = `${course} - ${subject} (${faculty}) @ ${center}`;
+    const description = `Class Schedule: ${course} - ${subject}\nFaculty: ${faculty}\nCenter: ${center}\nTime: ${timeStr}`;
+
+    const res = await calendar.events.insert({
+      calendarId: calendarId,
+      requestBody: {
+        summary: summary,
+        location: center,
+        description: description,
+        start: {
+          dateTime: startDate.toISOString(),
+        },
+        end: {
+          dateTime: endDate.toISOString(),
+        },
+      },
+    });
+
+    return res.data;
+  } catch (err) {
+    console.error('Google Calendar Sync Error:', err.message);
+    return null;
+  }
+}
+
+// Dynamically resolve target sheet tab name and sheet ID
+async function resolveSheetDetails(sheets) {
+  try {
+    const spreadsheet = await sheets.spreadsheets.get({ spreadsheetId: SPREADSHEET_ID });
+    const sheetList = spreadsheet.data.sheets || [];
+
+    // Match 'Schedule' or fallback to first sheet tab
+    const matchedSheet = sheetList.find(s => s.properties.title.trim().toLowerCase() === DEFAULT_SHEET_TAB.toLowerCase()) || sheetList[0];
+
+    return {
+      title: matchedSheet.properties.title,
+      sheetId: matchedSheet.properties.sheetId
+    };
+  } catch (e) {
+    return { title: DEFAULT_SHEET_TAB, sheetId: 0 };
+  }
+}
+
+// Telegram Message Sender Helper
+function sendTelegramMessage(chatId, text, parseMode = 'Markdown') {
+  return new Promise((resolve, reject) => {
+    const data = JSON.stringify({
+      chat_id: chatId,
+      text: text,
+      parse_mode: parseMode
+    });
+
+    const options = {
+      hostname: 'api.telegram.org',
+      port: 443,
+      path: `/bot${TELEGRAM_BOT_TOKEN}/sendMessage`,
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Content-Length': Buffer.byteLength(data)
+      }
+    };
+
+    const req = https.request(options, (res) => {
+      let body = '';
+      res.on('data', chunk => body += chunk);
+      res.on('end', () => resolve(body));
+    });
+
+    req.on('error', (e) => reject(e));
+    req.write(data);
+    req.end();
+  });
+}
+
+function isAuthorized(chatId, userId) {
+  const strChatId = String(chatId);
+  const strUserId = String(userId || '');
+  return strChatId === String(AUTHORIZED_CHAT_ID) || strUserId === String(AUTHORIZED_CHAT_ID);
 }
 
 // Vercel Serverless Entry Point

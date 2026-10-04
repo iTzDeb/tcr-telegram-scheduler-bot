@@ -221,121 +221,6 @@ function matchesFilter(dateStr, fullRowText, filterText) {
   });
 }
 
-// Helpers for Chronological Sorting & Insertion
-function parseDateStrToVal(dateStr) {
-  if (!dateStr) return 0;
-  // Clean string and strip ordinal suffixes like 1st, 2nd, 3rd, 4th
-  const str = String(dateStr).trim().toLowerCase().replace(/(\d+)(st|nd|rd|th)/g, '$1');
-  const months = {
-    jan: 0, january: 0,
-    feb: 1, february: 1,
-    mar: 2, march: 2,
-    apr: 3, april: 3,
-    may: 4,
-    jun: 5, june: 5,
-    jul: 6, july: 6,
-    aug: 7, august: 7,
-    sep: 8, sept: 8, september: 8,
-    oct: 9, october: 9,
-    nov: 10, november: 10,
-    dec: 11, december: 11
-  };
-
-  const defaultYear = new Date().getFullYear();
-
-  // Pattern 1: "06 Sept 2026", "6 Oct", "1 Oct 2026"
-  const dayMonthMatch = str.match(/^(\d{1,2})\s+([a-z]+)(?:\s+(\d{2,4}))?$/i);
-  if (dayMonthMatch) {
-    const day = parseInt(dayMonthMatch[1], 10);
-    const mStr = dayMonthMatch[2].toLowerCase();
-    let year = dayMonthMatch[3] ? parseInt(dayMonthMatch[3], 10) : defaultYear;
-    if (year < 100) year += 2000;
-    if (months[mStr] !== undefined) {
-      return new Date(Date.UTC(year, months[mStr], day)).getTime();
-    }
-  }
-
-  // Pattern 2: "Sept 06 2026", "Oct 6"
-  const monthDayMatch = str.match(/^([a-z]+)\s+(\d{1,2})(?:\s+(\d{2,4}))?$/i);
-  if (monthDayMatch) {
-    const mStr = monthDayMatch[1].toLowerCase();
-    const day = parseInt(monthDayMatch[2], 10);
-    let year = monthDayMatch[3] ? parseInt(monthDayMatch[3], 10) : defaultYear;
-    if (year < 100) year += 2000;
-    if (months[mStr] !== undefined) {
-      return new Date(Date.UTC(year, months[mStr], day)).getTime();
-    }
-  }
-
-  // Pattern 3: Slash / Dash / Dot formats like "01/10/2026", "06/09", "2026-10-01"
-  const parts = str.split(/[\/\-\.]/);
-  if (parts.length >= 2) {
-    if (parts[0].length === 4) {
-      // YYYY-MM-DD
-      const year = parseInt(parts[0], 10);
-      const month = parseInt(parts[1], 10) - 1;
-      const day = parseInt(parts[2], 10);
-      return new Date(Date.UTC(year, month, day)).getTime();
-    } else {
-      // DD/MM/YYYY or DD/MM
-      const day = parseInt(parts[0], 10);
-      const month = parseInt(parts[1], 10) - 1;
-      let year = parts[2] ? parseInt(parts[2], 10) : defaultYear;
-      if (year < 100) year += 2000;
-      if (!isNaN(day) && !isNaN(month)) {
-        return new Date(Date.UTC(year, month, day)).getTime();
-      }
-    }
-  }
-
-  const d = new Date(str);
-  return isNaN(d.getTime()) ? 0 : d.getTime();
-}
-
-function parseStartTimeToMinutes(timeStr) {
-  if (!timeStr) return 0;
-  const str = String(timeStr).trim().toLowerCase();
-  const match = str.match(/(\d{1,2})(?::(\d{2}))?\s*(am|pm)?/i);
-  if (!match) return 0;
-
-  let hours = parseInt(match[1], 10);
-  const minutes = match[2] ? parseInt(match[2], 10) : 0;
-  let ampm = match[3] ? match[3].toLowerCase() : null;
-
-  if (!ampm) {
-    if (str.includes('pm')) ampm = 'pm';
-    else if (str.includes('am')) ampm = 'am';
-  }
-
-  if (ampm === 'pm' && hours < 12) hours += 12;
-  if (ampm === 'am' && hours === 12) hours = 0;
-
-  return hours * 60 + minutes;
-}
-
-function findInsertionRowIndex(existingRows, newDateVal, newTimeVal) {
-  if (!newDateVal) return existingRows.length + 1; // Append at end if date unparseable
-
-  for (let i = 1; i < existingRows.length; i++) {
-    const row = existingRows[i];
-    const rDateStr = String(row[0] || '').trim();
-    if (!rDateStr) continue;
-
-    const rDateVal = parseDateStrToVal(rDateStr);
-    if (!rDateVal) continue;
-
-    const rTimeVal = parseStartTimeToMinutes(String(row[1] || ''));
-
-    if (rDateVal > newDateVal) {
-      return i + 1; // 1-based row index for Google Sheets
-    } else if (rDateVal === newDateVal && rTimeVal > newTimeVal) {
-      return i + 1;
-    }
-  }
-
-  return existingRows.length + 1; // Append at end if after all existing dates
-}
-
 // Helper to parse flexible create input (pipe, comma, newline, key-value)
 function parseCreateArgs(argsStr) {
   if (!argsStr) return null;
@@ -460,7 +345,7 @@ async function handleTelegramCommand(chatId, text) {
       `• \`/list 4 Oct 2026\` - List classes for date\n` +
       `• \`/list Laxmi Nagar\` - List classes by center\n\n` +
       `📌 */create* _Class Details_\n` +
-      `Add a new class row chronologically. Flexible formats supported:\n\n` +
+      `Add a new class row. Flexible formats supported:\n\n` +
       `• *Comma / Pipe / Newline:* \n` +
       `  \`/create 06 Sept 2026, 4:00 - 6:00PM, Laxmi Nagar, CLAT, Legal, Shivam Sir\`\n\n` +
       `• *Key-Value:* \n` +
@@ -629,27 +514,6 @@ async function handleCreateCommand(chatId, argsStr) {
 
   const { date: dateVal, time: timeVal, center: centerVal, course: courseVal, subject: subjectVal, faculty: facultyVal } = parsed;
 
-  // 1. Sync to Google Calendar
-  let calStatus = '';
-  let calSyncText = '⏳ Pending';
-  try {
-    const calResult = await createCalendarEvent({
-      dateStr: dateVal,
-      timeStr: timeVal,
-      center: centerVal,
-      course: courseVal,
-      subject: subjectVal,
-      faculty: facultyVal
-    });
-
-    if (calResult) {
-      calStatus = 'CALENDAR_SYNCED';
-      calSyncText = '✅ Synced to Google Calendar';
-    }
-  } catch (err) {
-    console.error('Calendar auto-sync error:', err.message);
-  }
-
   const sheets = getSheetsClient();
   const sheetDetails = await resolveSheetDetails(sheets);
 
@@ -706,14 +570,13 @@ async function handleCreateCommand(chatId, argsStr) {
   }
 
   const confirmMsg =
-    `✅ *Class Created Successfully! (Sorted Chronologically)*\n\n` +
-    `📍 *Row:* ${targetRowIndex}\n` +
+    `✅ *Class Created Successfully!*\n\n` +
+    `📍 *Row:* ${newRowIndex}\n` +
     `🗓 *Date:* ${dateVal}\n` +
     `⏰ *Time:* ${timeVal}\n` +
     `🏛 *Center:* ${centerVal}\n` +
     `📚 *Course:* ${courseVal} - ${subjectVal}\n` +
-    `👨‍🏫 *Faculty:* ${facultyVal}\n` +
-    `📅 *Calendar:* ${calSyncText}`;
+    `👨‍🏫 *Faculty:* ${facultyVal}`;
 
   await sendTelegramMessage(chatId, confirmMsg);
 }
@@ -845,6 +708,3 @@ async function handleDeleteCommand(chatId, argsStr) {
 module.exports._normalizeText = normalizeText;
 module.exports._matchesFilter = matchesFilter;
 module.exports._parseCreateArgs = parseCreateArgs;
-module.exports._parseDateStrToVal = parseDateStrToVal;
-module.exports._parseStartTimeToMinutes = parseStartTimeToMinutes;
-module.exports._findInsertionRowIndex = findInsertionRowIndex;

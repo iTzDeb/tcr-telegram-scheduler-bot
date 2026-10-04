@@ -2,13 +2,12 @@
 
 This repository contains the Node.js Telegram Bot webhook handler deployed on **Vercel** for managing the TCR Class Master Schedule in Google Sheets.
 
-With this Telegram Bot, authorized users can create, view, search, update, and delete class rows directly using Telegram slash commands on mobile or desktop. All changes automatically reflect in real-time in the master Google Sheet in chronological order.
+With this Telegram Bot, authorized users can create, view, search, update, and delete class rows directly using Telegram slash commands on mobile or desktop. All changes automatically reflect in real-time in the master Google Sheet.
 
 ---
 
 ## 🌟 Key Features
 
-- **Chronological Class Insertion:** Automatically parses class dates and start times to insert new class rows at their exact chronological position in the Google Sheet.
 - **Mobile-Friendly Natural Input:** Create or update classes using commas, newlines, key-value pairs, or pipes (`|`).
 - **Smart Date & Text Search:** Search for dates like `/list 4 Oct 2026` or `/list 04 Oct 2026` without missing entries or false matching unrelated time slots.
 - **Clean Card Layout:** Formatted Telegram responses with emojis, clear labels, and divider lines for easy reading on smartphones.
@@ -102,43 +101,50 @@ Supports 4 flexible input formats:
 
 ---
 
-## 📅 Google Calendar & Apps Script Sync (Important Note)
+## 🚀 Setup & Vercel Deployment Instructions
 
-> 💡 **Why don't Google Apps Script `onEdit(e)` triggers fire automatically when adding classes via Telegram Bot?**
-> Google Sheets intentionally **disables `onEdit(e)` triggers** for edits made programmatically via the Google Sheets API (like this Telegram bot). `onEdit(e)` only fires when a human manually types in the Google Sheets web interface.
+1. **Repository Setup:**
+   Push this repository to GitHub.
 
-### How to Automatically Sync Telegram-Created Classes to Google Calendar / Telegram Channels
+2. **Deploy to Vercel:**
+   Import the repository in Vercel as a Node.js project.
 
-To automatically process and sync classes created by the Telegram bot to Google Calendar or Telegram announcements, use a **Time-Driven Trigger** in Google Apps Script:
+3. **Configure Environment Variables in Vercel:**
+   | Variable Name | Description | Example |
+   |---|---|---|
+   | `TELEGRAM_BOT_TOKEN` | Bot token provided by Telegram `@BotFather` | `8093638286:AAHsl...` |
+   | `AUTHORIZED_CHAT_ID` | Telegram User or Chat ID authorized to run commands | `499900380` |
+   | `SPREADSHEET_ID` | Google Sheet ID from URL | `1n4feZRy9p0pEh...` |
+   | `GOOGLE_SERVICE_ACCOUNT_KEY` | Service Account JSON credentials string (or Base64 encoded JSON) | `{"type": "service_account", ...}` |
 
-1. Open your Google Sheet and click **Extensions > Apps Script**.
-2. Paste the script below into the Apps Script editor.
-3. Click the **Triggers (Alarm Icon ⏰)** in the left sidebar.
-4. Click **Add Trigger**:
-   - Choose function: `syncPendingClassesToCalendarAndTelegram`
-   - Select event source: **Time-driven**
-   - Select type of time based trigger: **Minutes timer**
-   - Select minute interval: **Every minute** (or **Every 5 minutes**)
-5. Save the trigger. Now, any class created via Telegram Bot, API, or manual edit will be synced automatically within 1 minute!
+4. **Set Telegram Webhook:**
+   Execute this URL in your browser replacing `<YOUR_TELEGRAM_BOT_TOKEN>` and `<YOUR_VERCEL_DOMAIN>`:
+   ```text
+   https://api.telegram.org/bot<YOUR_TELEGRAM_BOT_TOKEN>/setWebhook?url=https://<YOUR_VERCEL_DOMAIN>/
+   ```
 
 ---
 
-## 📜 Google Apps Script (GAS) Sync Code Snippet
+## 📜 Google Apps Script (GAS) Integration Code
+
+If you use Google Apps Script inside your Google Sheet to automatically process pending rows and broadcast class schedules to Telegram groups, paste the following snippet in your Google Sheet's **Extensions > Apps Script** editor:
 
 ```javascript
 /**
  * TCR Class Scheduler Google Apps Script (GAS)
- * Automatically syncs unsent/new class rows to Google Calendar and Telegram announcements.
+ * Sends pending schedule updates from Google Sheets to Telegram channels/groups.
  */
 
 const TELEGRAM_BOT_TOKEN = "YOUR_TELEGRAM_BOT_TOKEN";
 const TARGET_CHAT_ID = "YOUR_TELEGRAM_GROUP_OR_CHANNEL_ID"; // e.g. -100123456789
-const GOOGLE_CALENDAR_ID = "primary"; // Or your specific Google Calendar ID
 const SHEET_TAB_NAME = "Schedule";
 
-function syncPendingClassesToCalendarAndTelegram() {
+function sendPendingClassNotifications() {
   const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET_TAB_NAME);
-  if (!sheet) return;
+  if (!sheet) {
+    Logger.log("Sheet tab not found: " + SHEET_TAB_NAME);
+    return;
+  }
 
   const data = sheet.getDataRange().getValues();
   if (data.length <= 1) return;
@@ -151,61 +157,26 @@ function syncPendingClassesToCalendarAndTelegram() {
     const courseVal = row[3];
     const subjectVal = row[4];
     const facultyVal = row[5];
-    const statusVal = String(row[6] || '').trim().toUpperCase();
+    const statusVal = row[6];
 
-    // If row has valid date and status is NOT "SENT" or "CALENDAR_SYNCED"
-    if (dateVal && statusVal !== "SENT" && statusVal !== "CALENDAR_SYNCED") {
+    // Check if row has valid date & is not yet marked SENT
+    if (dateVal && String(statusVal).trim().toUpperCase() !== "SENT") {
+      const message =
+        "📢 *TCR Class Schedule Announcement*\n\n" +
+        "🗓 *Date:* " + dateVal + "\n" +
+        "⏰ *Time:* " + timeVal + "\n" +
+        "🏛 *Center:* " + centerVal + "\n" +
+        "📚 *Course:* " + courseVal + " - " + subjectVal + "\n" +
+        "👨‍🏫 *Faculty:* " + facultyVal;
 
-      // 1. Sync to Google Calendar
-      try {
-        createGoogleCalendarEvent(dateVal, timeVal, centerVal, courseVal, subjectVal, facultyVal);
-      } catch (err) {
-        Logger.log("Calendar sync error for Row " + (i + 1) + ": " + err.message);
+      const success = sendTelegram(TARGET_CHAT_ID, message);
+      if (success) {
+        // Mark row as SENT in Column G (Column 7)
+        sheet.getRange(i + 1, 7).setValue("SENT");
+        Logger.log("Notification sent for Row " + (i + 1));
       }
-
-      // 2. Broadcast to Telegram Channel/Group
-      if (TELEGRAM_BOT_TOKEN && TARGET_CHAT_ID) {
-        const message =
-          "📢 *TCR Class Schedule Announcement*\n\n" +
-          "🗓 *Date:* " + dateVal + "\n" +
-          "⏰ *Time:* " + timeVal + "\n" +
-          "🏛 *Center:* " + centerVal + "\n" +
-          "📚 *Course:* " + courseVal + " - " + subjectVal + "\n" +
-          "👨‍🏫 *Faculty:* " + facultyVal;
-
-        sendTelegram(TARGET_CHAT_ID, message);
-      }
-
-      // Mark row as SENT in Column G (Column 7)
-      sheet.getRange(i + 1, 7).setValue("SENT");
-      Logger.log("Successfully synced row " + (i + 1));
     }
   }
-}
-
-function createGoogleCalendarEvent(dateStr, timeStr, center, course, subject, faculty) {
-  const cal = CalendarApp.getCalendarById(GOOGLE_CALENDAR_ID) || CalendarApp.getDefaultCalendar();
-  if (!cal) return;
-
-  const title = course + " - " + subject + " (" + faculty + ") @ " + center;
-  const description = "Class Schedule: " + course + " " + subject + "\nFaculty: " + faculty + "\nCenter: " + center;
-
-  // Simple parser for Date & Time
-  const fullDateTimeStr = dateStr + " " + (timeStr ? timeStr.split("-")[0].trim() : "09:00AM");
-  const startTime = new Date(fullDateTimeStr);
-
-  if (isNaN(startTime.getTime())) {
-    Logger.log("Could not parse date for calendar: " + fullDateTimeStr);
-    return;
-  }
-
-  // Default duration 2 hours if end time not parsed
-  const endTime = new Date(startTime.getTime() + 2 * 60 * 60 * 1000);
-
-  cal.createEvent(title, startTime, endTime, {
-    location: center,
-    description: description
-  });
 }
 
 function sendTelegram(chatId, text) {
@@ -228,36 +199,21 @@ function sendTelegram(chatId, text) {
     const result = JSON.parse(response.getContentText());
     return result.ok === true;
   } catch (err) {
-    Logger.log("Telegram API Error: " + err.message);
+    Logger.log("Error sending Telegram message: " + err.message);
     return false;
   }
 }
+
+/**
+ * Time-driven trigger runner: Set this up to run automatically every hour or daily.
+ */
+function createTimeDrivenTrigger() {
+  ScriptApp.newTrigger("sendPendingClassNotifications")
+    .timeBased()
+    .everyHours(1)
+    .create();
+}
 ```
-
----
-
-## 🚀 Setup & Vercel Deployment Instructions
-
-1. **Repository Setup:**
-   Push this repository to GitHub.
-
-2. **Deploy to Vercel:**
-   Import the repository in Vercel as a Node.js project.
-
-3. **Configure Environment Variables in Vercel:**
-   | Variable Name | Description | Example |
-   |---|---|---|
-   | `TELEGRAM_BOT_TOKEN` | Bot token provided by Telegram `@BotFather` | `8093638286:AAHsl...` |
-   | `AUTHORIZED_CHAT_ID` | Telegram User or Chat ID authorized to run commands | `499900380` |
-   | `SPREADSHEET_ID` | Google Sheet ID from URL | `1n4feZRy9p0pEh...` |
-   | `GOOGLE_SERVICE_ACCOUNT_KEY` | Service Account JSON credentials string (or Base64 encoded JSON) | `{"type": "service_account", ...}` |
-   | `GOOGLE_CALENDAR_ID` | (Optional) Primary or specific Google Calendar ID for direct sync | `primary` or `c_xxx@group.calendar.google.com` |
-
-4. **Set Telegram Webhook:**
-   Execute this URL in your browser replacing `<YOUR_TELEGRAM_BOT_TOKEN>` and `<YOUR_VERCEL_DOMAIN>`:
-   ```text
-   https://api.telegram.org/bot<YOUR_TELEGRAM_BOT_TOKEN>/setWebhook?url=https://<YOUR_VERCEL_DOMAIN>/
-   ```
 
 ---
 

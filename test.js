@@ -19,16 +19,9 @@ try {
   };
 }
 
-const {
-  _normalizeText: normalizeText,
-  _matchesFilter: matchesFilter,
-  _parseCreateArgs: parseCreateArgs,
-  _parseDateStrToVal: parseDateStrToVal,
-  _parseStartTimeToMinutes: parseStartTimeToMinutes,
-  _findInsertionRowIndex: findInsertionRowIndex
-} = require('./api/index');
+const { _normalizeText: normalizeText, _matchesFilter: matchesFilter, _parseCreateArgs: parseCreateArgs } = require('./api/index');
 
-console.log('Running search/filter, natural input & chronological sorting tests...');
+console.log('Running search/filter & natural input parsing tests...');
 
 // 1. Date normalization tests (leading zero handling & month abbrev)
 assert.strictEqual(normalizeText('01 Oct 2026'), '1 oct 2026');
@@ -50,9 +43,16 @@ const row73 = '1 Oct 2026 04:30PM - 06:30PM Laxmi Nagar CLAT - English (Meenaksh
 const row80Date = '04 Oct 2026';
 const row80 = '04 Oct 2026 02:30PM - 04:30PM Laxmi Nagar CLAT - TCR CLAT Alumnus MOCK';
 
+// "01 Oct 2026" should match row 1 ("1 Oct 2026")
 assert.strictEqual(matchesFilter(row1Date, row1, '01 Oct 2026'), true, '01 Oct 2026 should match 1 Oct 2026 row');
+
+// "01 Oct 2026" should NOT match row 21 ("21 Oct 2026")
 assert.strictEqual(matchesFilter(row21Date, row21, '01 Oct 2026'), false, '01 Oct 2026 should NOT match 21 Oct 2026 row');
+
+// "4 oct 2026" should match row 80 ("04 Oct 2026")
 assert.strictEqual(matchesFilter(row80Date, row80, '4 oct 2026'), true, '4 oct 2026 should match 04 Oct 2026 row');
+
+// "4 oct 2026" should NOT match row 73 ("1 Oct 2026" with 04:30PM time)
 assert.strictEqual(matchesFilter(row73Date, row73, '4 oct 2026'), false, '4 oct 2026 should NOT match 1 Oct 2026 row with 04:30PM time');
 
 // 3. Natural / Flexible /create input parsing
@@ -65,83 +65,28 @@ const expectedParsed = {
   faculty: 'Shivam Sir'
 };
 
+// Pipe separated
 assert.deepStrictEqual(
   parseCreateArgs('06 Sept 2026 | 4:00 - 6:00PM | Laxmi Nagar | CLAT | Legal | Shivam Sir'),
   expectedParsed
 );
 
+// Comma separated
 assert.deepStrictEqual(
   parseCreateArgs('06 Sept 2026, 4:00 - 6:00PM, Laxmi Nagar, CLAT, Legal, Shivam Sir'),
   expectedParsed
 );
 
+// Newline separated
 assert.deepStrictEqual(
   parseCreateArgs('06 Sept 2026\n4:00 - 6:00PM\nLaxmi Nagar\nCLAT\nLegal\nShivam Sir'),
   expectedParsed
 );
 
+// Key-Value multi-line
 assert.deepStrictEqual(
   parseCreateArgs('Date: 06 Sept 2026\nTime: 4:00 - 6:00PM\nCenter: Laxmi Nagar\nCourse: CLAT\nSubject: Legal\nFaculty: Shivam Sir'),
   expectedParsed
 );
 
-// 4. Test parseDateStrToVal with various date formats (including missing year, ordinal suffixes, reverse day/month)
-const year = new Date().getFullYear();
-assert.ok(parseDateStrToVal('06 Sept') > 0, '06 Sept without year should parse');
-assert.ok(parseDateStrToVal('6 Oct') > 0, '6 Oct without year should parse');
-assert.ok(parseDateStrToVal('Oct 6') > 0, 'Oct 6 reverse order should parse');
-assert.ok(parseDateStrToVal('1st Oct 2026') > 0, '1st Oct with ordinal suffix should parse');
-assert.strictEqual(
-  new Date(parseDateStrToVal('06 Sept')).getUTCMonth(),
-  8,
-  '06 Sept month should be September (month index 8)'
-);
-assert.strictEqual(
-  new Date(parseDateStrToVal('06 Sept')).getUTCDate(),
-  6,
-  '06 Sept date should be 6'
-);
-
-// 5. Chronological Sorting & Insertion Tests
-const existingRows = [
-  ['Date', 'Time', 'Center', 'Course', 'Subject', 'Faculty'],
-  ['04 Oct 2026', '02:30PM - 04:30PM', 'Laxmi Nagar', 'CLAT'],
-  ['04 Oct 2026', '05:00PM - 07:00PM', 'Laxmi Nagar', 'CLAT'],
-  ['05 Oct 2026', '11:00AM - 01:00PM', 'Laxmi Nagar', 'CLAT'],
-  ['18 Nov 2026', '05:00PM - 07:00PM', 'Laxmi Nagar', 'AIBE'],
-  ['20 Nov 2026', '05:00PM - 07:00PM', 'Laxmi Nagar', 'AIBE']
-];
-
-// Case A: Insert 6 Oct 2026 (between 05 Oct and 18 Nov) -> should insert before Row 5 (18 Nov), returning Row 5!
-const insertIdx6Oct = findInsertionRowIndex(
-  existingRows,
-  parseDateStrToVal('6 Oct 2026'),
-  parseStartTimeToMinutes('03:00PM - 05:00PM')
-);
-assert.strictEqual(insertIdx6Oct, 5, '6 Oct class should be inserted at Row 5');
-
-// Case B: Insert 05 Oct 2026 @ 03:00PM (after 05 Oct 11:00AM and before 18 Nov) -> should insert before Row 5, returning Row 5!
-const insertIdx5OctAfternoon = findInsertionRowIndex(
-  existingRows,
-  parseDateStrToVal('05 Oct 2026'),
-  parseStartTimeToMinutes('03:00PM - 05:00PM')
-);
-assert.strictEqual(insertIdx5OctAfternoon, 5, '05 Oct 03:00PM class should be inserted at Row 5');
-
-// Case C: Insert 04 Oct 2026 @ 04:00PM (between 02:30PM and 05:00PM) -> should insert before Row 3 (05:00PM), returning Row 3!
-const insertIdx4OctMidday = findInsertionRowIndex(
-  existingRows,
-  parseDateStrToVal('04 Oct 2026'),
-  parseStartTimeToMinutes('04:00PM - 06:00PM')
-);
-assert.strictEqual(insertIdx4OctMidday, 3, '04 Oct 04:00PM class should be inserted at Row 3');
-
-// Case D: Insert 25 Nov 2026 (after all existing dates) -> should append at bottom (Row 7)
-const insertIdx25Nov = findInsertionRowIndex(
-  existingRows,
-  parseDateStrToVal('25 Nov 2026'),
-  parseStartTimeToMinutes('05:00PM - 07:00PM')
-);
-assert.strictEqual(insertIdx25Nov, 7, '25 Nov class should be appended at Row 7');
-
-console.log('All search/filter, natural input & chronological sorting tests passed successfully!');
+console.log('All search/filter & natural input parsing tests passed successfully!');

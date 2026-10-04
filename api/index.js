@@ -7,8 +7,8 @@ const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '8093638286:AAHslkV
 const AUTHORIZED_CHAT_ID = process.env.AUTHORIZED_CHAT_ID || '499900380';
 const DEFAULT_SHEET_TAB = 'Schedule';
 
-// Helper to authenticate with Google Sheets API
-function getSheetsClient() {
+// Helper to authenticate with Google Auth (Sheets & Calendar)
+function getGoogleAuth() {
   let auth;
   if (process.env.GOOGLE_SERVICE_ACCOUNT_KEY) {
     let rawKey = process.env.GOOGLE_SERVICE_ACCOUNT_KEY.trim();
@@ -47,14 +47,70 @@ function getSheetsClient() {
 
     auth = new google.auth.GoogleAuth({
       credentials,
-      scopes: ['https://www.googleapis.com/auth/spreadsheets']
+      scopes: [
+        'https://www.googleapis.com/auth/spreadsheets',
+        'https://www.googleapis.com/auth/calendar'
+      ]
     });
   } else {
     auth = new google.auth.GoogleAuth({
-      scopes: ['https://www.googleapis.com/auth/spreadsheets']
+      scopes: [
+        'https://www.googleapis.com/auth/spreadsheets',
+        'https://www.googleapis.com/auth/calendar'
+      ]
     });
   }
+  return auth;
+}
+
+function getSheetsClient() {
+  const auth = getGoogleAuth();
   return google.sheets({ version: 'v4', auth });
+}
+
+function getCalendarClient() {
+  const auth = getGoogleAuth();
+  return google.calendar({ version: 'v3', auth });
+}
+
+// Function to automatically sync class to Google Calendar
+async function createCalendarEvent({ dateStr, timeStr, center, course, subject, faculty }) {
+  const calendarId = process.env.GOOGLE_CALENDAR_ID || 'primary';
+  try {
+    const calendar = getCalendarClient();
+    const dateVal = parseDateStrToVal(dateStr);
+    if (!dateVal) return null;
+
+    const startMinutes = parseStartTimeToMinutes(timeStr);
+    const startDate = new Date(dateVal);
+    startDate.setUTCHours(Math.floor(startMinutes / 60), startMinutes % 60, 0, 0);
+
+    // Default duration 2 hours
+    const endDate = new Date(startDate.getTime() + 2 * 60 * 60 * 1000);
+
+    const summary = `${course} - ${subject} (${faculty}) @ ${center}`;
+    const description = `Class Schedule: ${course} - ${subject}\nFaculty: ${faculty}\nCenter: ${center}\nTime: ${timeStr}`;
+
+    const res = await calendar.events.insert({
+      calendarId: calendarId,
+      requestBody: {
+        summary: summary,
+        location: center,
+        description: description,
+        start: {
+          dateTime: startDate.toISOString(),
+        },
+        end: {
+          dateTime: endDate.toISOString(),
+        },
+      },
+    });
+
+    return res.data;
+  } catch (err) {
+    console.error('Google Calendar Sync Error:', err.message);
+    return null;
+  }
 }
 
 // Dynamically resolve target sheet tab name and sheet ID
@@ -113,6 +169,248 @@ function isAuthorized(chatId, userId) {
   return strChatId === String(AUTHORIZED_CHAT_ID) || strUserId === String(AUTHORIZED_CHAT_ID);
 }
 
+// Helper to normalize search/filter text and row data for fuzzy date and boundary matching
+function normalizeText(text) {
+  if (!text) return '';
+  return text
+    .toLowerCase()
+    .replace(/\bseptember\b|\bsept\b/g, 'sep')
+    .replace(/\boctober\b/g, 'oct')
+    .replace(/\bjanuary\b/g, 'jan')
+    .replace(/\bfebruary\b/g, 'feb')
+    .replace(/\bmarch\b/g, 'mar')
+    .replace(/\bapril\b/g, 'apr')
+    .replace(/\bjune\b/g, 'jun')
+    .replace(/\bjuly\b/g, 'jul')
+    .replace(/\baugust\b/g, 'aug')
+    .replace(/\bnovember\b/g, 'nov')
+    .replace(/\bdecember\b/g, 'dec')
+    // Strip leading zeros from day numbers / numeric tokens (e.g., "01" -> "1", "06" -> "6")
+    .replace(/\b0([1-9])\b/g, '$1');
+}
+
+function matchesFilter(dateStr, fullRowText, filterText) {
+  const normDate = normalizeText(dateStr);
+  const normFilter = normalizeText(filterText);
+  if (!normFilter) return true;
+
+  const tokens = normFilter.split(/\s+/).filter(Boolean);
+  const monthTokens = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'];
+  const hasMonthToken = tokens.some(t => monthTokens.includes(t));
+
+  // If filter contains month name (e.g. "oct"), match date strictly against dateStr
+  if (hasMonthToken) {
+    return tokens.every(token => {
+      const escaped = token.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&');
+      const regex = new RegExp('\\b' + escaped + '\\b', 'i');
+      return regex.test(normDate);
+    });
+  }
+
+  // General query (e.g. "Laxmi Nagar" or "CLAT")
+  const normRow = normalizeText(fullRowText);
+  if (normRow.includes(normFilter)) return true;
+
+  return tokens.every(token => {
+    const escaped = token.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&');
+    if (/^[a-z0-9]+$/i.test(token)) {
+      const regex = new RegExp('\\b' + escaped + '\\b', 'i');
+      return regex.test(normRow);
+    }
+    return normRow.includes(token);
+  });
+}
+
+// Helpers for Chronological Sorting & Insertion
+function parseDateStrToVal(dateStr) {
+  if (!dateStr) return 0;
+  // Clean string and strip ordinal suffixes like 1st, 2nd, 3rd, 4th
+  const str = String(dateStr).trim().toLowerCase().replace(/(\d+)(st|nd|rd|th)/g, '$1');
+  const months = {
+    jan: 0, january: 0,
+    feb: 1, february: 1,
+    mar: 2, march: 2,
+    apr: 3, april: 3,
+    may: 4,
+    jun: 5, june: 5,
+    jul: 6, july: 6,
+    aug: 7, august: 7,
+    sep: 8, sept: 8, september: 8,
+    oct: 9, october: 9,
+    nov: 10, november: 10,
+    dec: 11, december: 11
+  };
+
+  const defaultYear = new Date().getFullYear();
+
+  // Pattern 1: "06 Sept 2026", "6 Oct", "1 Oct 2026"
+  const dayMonthMatch = str.match(/^(\d{1,2})\s+([a-z]+)(?:\s+(\d{2,4}))?$/i);
+  if (dayMonthMatch) {
+    const day = parseInt(dayMonthMatch[1], 10);
+    const mStr = dayMonthMatch[2].toLowerCase();
+    let year = dayMonthMatch[3] ? parseInt(dayMonthMatch[3], 10) : defaultYear;
+    if (year < 100) year += 2000;
+    if (months[mStr] !== undefined) {
+      return new Date(Date.UTC(year, months[mStr], day)).getTime();
+    }
+  }
+
+  // Pattern 2: "Sept 06 2026", "Oct 6"
+  const monthDayMatch = str.match(/^([a-z]+)\s+(\d{1,2})(?:\s+(\d{2,4}))?$/i);
+  if (monthDayMatch) {
+    const mStr = monthDayMatch[1].toLowerCase();
+    const day = parseInt(monthDayMatch[2], 10);
+    let year = monthDayMatch[3] ? parseInt(monthDayMatch[3], 10) : defaultYear;
+    if (year < 100) year += 2000;
+    if (months[mStr] !== undefined) {
+      return new Date(Date.UTC(year, months[mStr], day)).getTime();
+    }
+  }
+
+  // Pattern 3: Slash / Dash / Dot formats like "01/10/2026", "06/09", "2026-10-01"
+  const parts = str.split(/[\/\-\.]/);
+  if (parts.length >= 2) {
+    if (parts[0].length === 4) {
+      // YYYY-MM-DD
+      const year = parseInt(parts[0], 10);
+      const month = parseInt(parts[1], 10) - 1;
+      const day = parseInt(parts[2], 10);
+      return new Date(Date.UTC(year, month, day)).getTime();
+    } else {
+      // DD/MM/YYYY or DD/MM
+      const day = parseInt(parts[0], 10);
+      const month = parseInt(parts[1], 10) - 1;
+      let year = parts[2] ? parseInt(parts[2], 10) : defaultYear;
+      if (year < 100) year += 2000;
+      if (!isNaN(day) && !isNaN(month)) {
+        return new Date(Date.UTC(year, month, day)).getTime();
+      }
+    }
+  }
+
+  const d = new Date(str);
+  return isNaN(d.getTime()) ? 0 : d.getTime();
+}
+
+function parseStartTimeToMinutes(timeStr) {
+  if (!timeStr) return 0;
+  const str = String(timeStr).trim().toLowerCase();
+  const match = str.match(/(\d{1,2})(?::(\d{2}))?\s*(am|pm)?/i);
+  if (!match) return 0;
+
+  let hours = parseInt(match[1], 10);
+  const minutes = match[2] ? parseInt(match[2], 10) : 0;
+  let ampm = match[3] ? match[3].toLowerCase() : null;
+
+  if (!ampm) {
+    if (str.includes('pm')) ampm = 'pm';
+    else if (str.includes('am')) ampm = 'am';
+  }
+
+  if (ampm === 'pm' && hours < 12) hours += 12;
+  if (ampm === 'am' && hours === 12) hours = 0;
+
+  return hours * 60 + minutes;
+}
+
+function findInsertionRowIndex(existingRows, newDateVal, newTimeVal) {
+  if (!newDateVal) return existingRows.length + 1; // Append at end if date unparseable
+
+  for (let i = 1; i < existingRows.length; i++) {
+    const row = existingRows[i];
+    const rDateStr = String(row[0] || '').trim();
+    if (!rDateStr) continue;
+
+    const rDateVal = parseDateStrToVal(rDateStr);
+    if (!rDateVal) continue;
+
+    const rTimeVal = parseStartTimeToMinutes(String(row[1] || ''));
+
+    if (rDateVal > newDateVal) {
+      return i + 1; // 1-based row index for Google Sheets
+    } else if (rDateVal === newDateVal && rTimeVal > newTimeVal) {
+      return i + 1;
+    }
+  }
+
+  return existingRows.length + 1; // Append at end if after all existing dates
+}
+
+// Helper to parse flexible create input (pipe, comma, newline, key-value)
+function parseCreateArgs(argsStr) {
+  if (!argsStr) return null;
+
+  // 1. Pipe separated
+  if (argsStr.includes('|')) {
+    const parts = argsStr.split('|').map(s => s.trim());
+    if (parts.length >= 6) {
+      return {
+        date: parts[0],
+        time: parts[1],
+        center: parts[2],
+        course: parts[3],
+        subject: parts[4],
+        faculty: parts[5]
+      };
+    }
+  }
+
+  // 2. Multi-line (newlines)
+  if (argsStr.includes('\n')) {
+    const lines = argsStr.split('\n').map(s => s.trim()).filter(Boolean);
+
+    // Check Key-Value syntax (e.g. "Date: 06 Sept 2026")
+    const kv = {};
+    lines.forEach(line => {
+      const idx = line.indexOf(':');
+      if (idx !== -1) {
+        const key = line.substring(0, idx).trim().toLowerCase();
+        const val = line.substring(idx + 1).trim();
+        kv[key] = val;
+      }
+    });
+
+    if (kv.date || kv.time || kv.center || kv.course || kv.subject || kv.faculty) {
+      return {
+        date: kv.date || kv.dt || '',
+        time: kv.time || kv.tm || '',
+        center: kv.center || kv.centre || kv.loc || kv.location || '',
+        course: kv.course || kv.batch || '',
+        subject: kv.subject || kv.sub || '',
+        faculty: kv.faculty || kv.teacher || kv.sir || kv.maam || ''
+      };
+    }
+
+    if (lines.length >= 6) {
+      return {
+        date: lines[0],
+        time: lines[1],
+        center: lines[2],
+        course: lines[3],
+        subject: lines[4],
+        faculty: lines[5]
+      };
+    }
+  }
+
+  // 3. Comma separated
+  if (argsStr.includes(',')) {
+    const parts = argsStr.split(',').map(s => s.trim());
+    if (parts.length >= 6) {
+      return {
+        date: parts[0],
+        time: parts[1],
+        center: parts[2],
+        course: parts[3],
+        subject: parts[4],
+        faculty: parts[5]
+      };
+    }
+  }
+
+  return null;
+}
+
 // Vercel Serverless Entry Point
 module.exports = async (req, res) => {
   if (req.method !== 'POST') {
@@ -148,7 +446,7 @@ module.exports = async (req, res) => {
 
 // Slash Command Routing Logic
 async function handleTelegramCommand(chatId, text) {
-  const parts = text.split(' ');
+  const parts = text.split(/\s+/);
   const command = parts[0].toLowerCase();
   const argsStr = text.substring(parts[0].length).trim();
 
@@ -159,21 +457,26 @@ async function handleTelegramCommand(chatId, text) {
       `📌 */list* _[date or filter]_\n` +
       `View schedule. Examples:\n` +
       `• \`/list\` - List all upcoming classes\n` +
-      `• \`/list 30 Aug 2026\` - List classes for specific date\n` +
+      `• \`/list 4 Oct 2026\` - List classes for date\n` +
       `• \`/list Laxmi Nagar\` - List classes by center\n\n` +
-      `📌 */create* _Date | Time | Center | Course | Subject | Faculty_\n` +
-      `Add a new class row. Example:\n` +
-      `• \`/create 06 Sept 2026 | 4:00 - 6:00PM | Laxmi Nagar | CLAT | Legal | Shivam Sir\`\n\n` +
-      `📌 */update* _RowNumber Field NewValue_ OR _RowNumber Date | Time | ..._\n` +
-      `Update an existing class row. Examples:\n` +
-      `• \`/update 15 Time 5:00 - 7:00PM\`\n` +
-      `• \`/update 15 Faculty Anand Sir\`\n` +
-      `• \`/update 15 06 Sept 2026 | 4:00 - 6:00PM | Laxmi Nagar | CLAT | Legal | Shivam Sir\`\n\n` +
+      `📌 */create* _Class Details_\n` +
+      `Add a new class row chronologically. Flexible formats supported:\n\n` +
+      `• *Comma / Pipe / Newline:* \n` +
+      `  \`/create 06 Sept 2026, 4:00 - 6:00PM, Laxmi Nagar, CLAT, Legal, Shivam Sir\`\n\n` +
+      `• *Key-Value:* \n` +
+      `  \`/create\`\n` +
+      `  \`Date: 06 Sept 2026\`\n` +
+      `  \`Time: 4:00 - 6:00PM\`\n` +
+      `  \`Center: Laxmi Nagar\`\n` +
+      `  \`Course: CLAT\`\n` +
+      `  \`Subject: Legal\`\n` +
+      `  \`Faculty: Shivam Sir\`\n\n` +
+      `📌 */update* _RowNumber Field NewValue_\n` +
+      `Update row. Example: \`/update 15 Time 5:00 - 7:00PM\`\n\n` +
       `📌 */delete* _RowNumber_\n` +
-      `Delete class row. Example:\n` +
-      `• \`/delete 15\`\n\n` +
+      `Delete row. Example: \`/delete 15\`\n\n` +
       `📌 */check*\n` +
-      `Check system online status and count of pending classes.`;
+      `Check bot online status and pending dispatches.`;
     
     await sendTelegramMessage(chatId, helpMsg);
     return;
@@ -243,7 +546,6 @@ async function handleListCommand(chatId, filterText) {
     return;
   }
 
-  const filter = filterText.toLowerCase().trim();
   const matchingRows = [];
 
   for (let i = 1; i < rows.length; i++) {
@@ -258,9 +560,9 @@ async function handleListCommand(chatId, filterText) {
     const facultyStr = String(row[5] || '').trim();
     const statusStr = String(row[6] || '').trim();
 
-    const fullRowText = `${dateStr} ${timeStr} ${centerStr} ${courseStr} ${subjectStr} ${facultyStr} ${statusStr}`.toLowerCase();
+    const fullRowText = `${dateStr} ${timeStr} ${centerStr} ${courseStr} ${subjectStr} ${facultyStr} ${statusStr}`;
 
-    if (!filter || fullRowText.includes(filter)) {
+    if (!filterText || matchesFilter(dateStr, fullRowText, filterText)) {
       matchingRows.push({
         rowNum: i + 1,
         date: dateStr,
@@ -279,11 +581,20 @@ async function handleListCommand(chatId, filterText) {
     return;
   }
 
-  let message = filter ? `📅 *Classes matching "${filterText}"* (${matchingRows.length}):\n\n` : `📅 *Master Class Schedule* (${matchingRows.length} classes):\n\n`;
+  let message = filterText ? `📅 *Classes matching "${filterText}"* (${matchingRows.length}):\n\n` : `📅 *Master Class Schedule* (${matchingRows.length} classes):\n\n`;
 
-  matchingRows.forEach(item => {
-    const statusBadge = item.status === 'SENT' ? ' `[SENT]`' : '';
-    message += `• *Row ${item.rowNum}*: ${item.date} | ${item.time} | ${item.center} | ${item.course} - ${item.subject} (${item.faculty})${statusBadge}\n`;
+  matchingRows.forEach((item, index) => {
+    const statusBadge = item.status === 'SENT' ? ' ✅ `SENT`' : '';
+    message += `📍 *Row ${item.rowNum}* ${statusBadge}\n` +
+               `🗓 *Date:* ${item.date}\n` +
+               `⏰ *Time:* ${item.time}\n` +
+               `🏛 *Center:* ${item.center}\n` +
+               `📚 *Course:* ${item.course} | *Subject:* ${item.subject}\n` +
+               `👨‍🏫 *Faculty:* ${item.faculty}\n`;
+
+    if (index < matchingRows.length - 1) {
+      message += `───────────────\n`;
+    }
   });
 
   if (message.length > 4000) {
@@ -294,45 +605,122 @@ async function handleListCommand(chatId, filterText) {
 }
 
 async function handleCreateCommand(chatId, argsStr) {
-  if (!argsStr) {
-    await sendTelegramMessage(chatId, `⚠️ *Usage:* \`/create Date | Time | Center | Course | Subject | Faculty\`\n\n*Example:*\n\`/create 06 Sept 2026 | 4:00 - 6:00PM | Laxmi Nagar | CLAT | Legal | Shivam Sir\``);
+  const parsed = parseCreateArgs(argsStr);
+
+  if (!parsed || (!parsed.date && !parsed.time)) {
+    const usageMsg =
+      `⚠️ *How to create a class:* You can use commas, newlines, or key-value format!\n\n` +
+      `*1. Natural / Comma Separated:* (easiest on mobile)\n` +
+      `\`/create 06 Sept 2026, 4:00 - 6:00PM, Laxmi Nagar, CLAT, Legal, Shivam Sir\`\n\n` +
+      `*2. Key-Value format:*\n` +
+      `\`/create\`\n` +
+      `\`Date: 06 Sept 2026\`\n` +
+      `\`Time: 4:00 - 6:00PM\`\n` +
+      `\`Center: Laxmi Nagar\`\n` +
+      `\`Course: CLAT\`\n` +
+      `\`Subject: Legal\`\n` +
+      `\`Faculty: Shivam Sir\`\n\n` +
+      `*3. Pipe Separated:*\n` +
+      `\`/create 06 Sept 2026 | 4:00 - 6:00PM | Laxmi Nagar | CLAT | Legal | Shivam Sir\``;
+
+    await sendTelegramMessage(chatId, usageMsg);
     return;
   }
 
-  const parts = argsStr.split('|').map(s => s.trim());
-  if (parts.length < 6) {
-    await sendTelegramMessage(chatId, `⚠️ Invalid format. Please provide 6 parameters separated by \`|\`:\n\`Date | Time | Center | Course | Subject | Faculty\``);
-    return;
-  }
+  const { date: dateVal, time: timeVal, center: centerVal, course: courseVal, subject: subjectVal, faculty: facultyVal } = parsed;
 
-  const dateVal = parts[0];
-  const timeVal = parts[1];
-  const centerVal = parts[2];
-  const courseVal = parts[3];
-  const subjectVal = parts[4];
-  const facultyVal = parts[5];
+  // 1. Sync to Google Calendar
+  let calStatus = '';
+  let calSyncText = '⏳ Pending';
+  try {
+    const calResult = await createCalendarEvent({
+      dateStr: dateVal,
+      timeStr: timeVal,
+      center: centerVal,
+      course: courseVal,
+      subject: subjectVal,
+      faculty: facultyVal
+    });
+
+    if (calResult) {
+      calStatus = 'CALENDAR_SYNCED';
+      calSyncText = '✅ Synced to Google Calendar';
+    }
+  } catch (err) {
+    console.error('Calendar auto-sync error:', err.message);
+  }
 
   const sheets = getSheetsClient();
   const sheetDetails = await resolveSheetDetails(sheets);
-  const appendRes = await sheets.spreadsheets.values.append({
+
+  // Read existing schedule rows to determine chronological insertion position
+  const readRes = await sheets.spreadsheets.values.get({
     spreadsheetId: SPREADSHEET_ID,
-    range: `'${sheetDetails.title}'!A:G`,
-    valueInputOption: 'USER_ENTERED',
-    requestBody: {
-      values: [[dateVal, timeVal, centerVal, courseVal, subjectVal, facultyVal, '']]
-    }
+    range: `'${sheetDetails.title}'!A1:G`
   });
 
-  const updatedRange = appendRes.data.updates.updatedRange;
-  const rowMatch = updatedRange.match(/(\d+)$/);
-  const newRowIndex = rowMatch ? rowMatch[1] : 'New';
+  const existingRows = readRes.data.values || [];
+  const newDateVal = parseDateStrToVal(dateVal);
+  const newTimeVal = parseStartTimeToMinutes(timeVal);
 
-  await sendTelegramMessage(chatId, `✅ *Class Created Successfully!*\n\n• *Row:* ${newRowIndex}\n• *Date:* ${dateVal}\n• *Time:* ${timeVal}\n• *Center:* ${centerVal}\n• *Course:* ${courseVal}\n• *Subject:* ${subjectVal}\n• *Faculty:* ${facultyVal}`);
+  const targetRowIndex = findInsertionRowIndex(existingRows, newDateVal, newTimeVal);
+
+  if (targetRowIndex > existingRows.length) {
+    // Append at the bottom of the sheet
+    await sheets.spreadsheets.values.append({
+      spreadsheetId: SPREADSHEET_ID,
+      range: `'${sheetDetails.title}'!A:G`,
+      valueInputOption: 'USER_ENTERED',
+      requestBody: {
+        values: [[dateVal, timeVal, centerVal, courseVal, subjectVal, facultyVal, calStatus]]
+      }
+    });
+  } else {
+    // Insert a new row at targetRowIndex (convert to 0-based start/end index)
+    await sheets.spreadsheets.batchUpdate({
+      spreadsheetId: SPREADSHEET_ID,
+      requestBody: {
+        requests: [{
+          insertDimension: {
+            range: {
+              sheetId: sheetDetails.sheetId,
+              dimension: 'ROWS',
+              startIndex: targetRowIndex - 1,
+              endIndex: targetRowIndex
+            },
+            inheritFromBefore: true
+          }
+        }]
+      }
+    });
+
+    // Populate row values at targetRowIndex
+    await sheets.spreadsheets.values.update({
+      spreadsheetId: SPREADSHEET_ID,
+      range: `'${sheetDetails.title}'!A${targetRowIndex}:G${targetRowIndex}`,
+      valueInputOption: 'USER_ENTERED',
+      requestBody: {
+        values: [[dateVal, timeVal, centerVal, courseVal, subjectVal, facultyVal, calStatus]]
+      }
+    });
+  }
+
+  const confirmMsg =
+    `✅ *Class Created Successfully! (Sorted Chronologically)*\n\n` +
+    `📍 *Row:* ${targetRowIndex}\n` +
+    `🗓 *Date:* ${dateVal}\n` +
+    `⏰ *Time:* ${timeVal}\n` +
+    `🏛 *Center:* ${centerVal}\n` +
+    `📚 *Course:* ${courseVal} - ${subjectVal}\n` +
+    `👨‍🏫 *Faculty:* ${facultyVal}\n` +
+    `📅 *Calendar:* ${calSyncText}`;
+
+  await sendTelegramMessage(chatId, confirmMsg);
 }
 
 async function handleUpdateCommand(chatId, argsStr) {
   if (!argsStr) {
-    await sendTelegramMessage(chatId, `⚠️ *Usage:* \`/update RowNumber Field NewValue\` OR \`/update RowNumber Date | Time | Center | Course | Subject | Faculty\`\n\n*Examples:*\n• \`/update 15 Time 5:00 - 7:00PM\`\n• \`/update 15 Faculty Anand Sir\`\n• \`/update 15 06 Sept 2026 | 4:00 - 6:00PM | Laxmi Nagar | CLAT | Legal | Shivam Sir\``);
+    await sendTelegramMessage(chatId, `⚠️ *Usage:* \`/update RowNumber Field NewValue\` OR \`/update RowNumber Date, Time, Center, Course, Subject, Faculty\`\n\n*Examples:*\n• \`/update 15 Time 5:00 - 7:00PM\`\n• \`/update 15 Faculty Anand Sir\``);
     return;
   }
 
@@ -354,21 +742,19 @@ async function handleUpdateCommand(chatId, argsStr) {
     return;
   }
 
-  // Check if pipe-separated full row update
-  if (restStr.includes('|')) {
-    const parts = restStr.split('|').map(s => s.trim());
-    if (parts.length >= 6) {
-      await sheets.spreadsheets.values.update({
-        spreadsheetId: SPREADSHEET_ID,
-        range: `'${sheetDetails.title}'!A${rowNum}:G${rowNum}`,
-        valueInputOption: 'USER_ENTERED',
-        requestBody: {
-          values: [[parts[0], parts[1], parts[2], parts[3], parts[4], parts[5], '']]
-        }
-      });
-      await sendTelegramMessage(chatId, `✅ *Row ${rowNum} updated completely!*`);
-      return;
-    }
+  // Check if pipe or comma separated full row update
+  const parsed = parseCreateArgs(restStr);
+  if (parsed && parsed.date && parsed.time) {
+    await sheets.spreadsheets.values.update({
+      spreadsheetId: SPREADSHEET_ID,
+      range: `'${sheetDetails.title}'!A${rowNum}:G${rowNum}`,
+      valueInputOption: 'USER_ENTERED',
+      requestBody: {
+        values: [[parsed.date, parsed.time, parsed.center, parsed.course, parsed.subject, parsed.faculty, '']]
+      }
+    });
+    await sendTelegramMessage(chatId, `✅ *Row ${rowNum} updated completely!*`);
+    return;
   }
 
   // Single field update
@@ -454,3 +840,11 @@ async function handleDeleteCommand(chatId, argsStr) {
 
   await sendTelegramMessage(chatId, `🗑️ *Class Row ${rowNum} Deleted Successfully!*`);
 }
+
+// Export internal functions for unit testing
+module.exports._normalizeText = normalizeText;
+module.exports._matchesFilter = matchesFilter;
+module.exports._parseCreateArgs = parseCreateArgs;
+module.exports._parseDateStrToVal = parseDateStrToVal;
+module.exports._parseStartTimeToMinutes = parseStartTimeToMinutes;
+module.exports._findInsertionRowIndex = findInsertionRowIndex;

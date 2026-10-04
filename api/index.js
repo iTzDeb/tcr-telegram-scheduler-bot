@@ -7,8 +7,8 @@ const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '8093638286:AAHslkV
 const AUTHORIZED_CHAT_ID = process.env.AUTHORIZED_CHAT_ID || '499900380';
 const DEFAULT_SHEET_TAB = 'Schedule';
 
-// Helper to authenticate with Google Sheets API
-function getSheetsClient() {
+// Helper to authenticate with Google Auth (Sheets & Calendar)
+function getGoogleAuth() {
   let auth;
   if (process.env.GOOGLE_SERVICE_ACCOUNT_KEY) {
     let rawKey = process.env.GOOGLE_SERVICE_ACCOUNT_KEY.trim();
@@ -47,14 +47,70 @@ function getSheetsClient() {
 
     auth = new google.auth.GoogleAuth({
       credentials,
-      scopes: ['https://www.googleapis.com/auth/spreadsheets']
+      scopes: [
+        'https://www.googleapis.com/auth/spreadsheets',
+        'https://www.googleapis.com/auth/calendar'
+      ]
     });
   } else {
     auth = new google.auth.GoogleAuth({
-      scopes: ['https://www.googleapis.com/auth/spreadsheets']
+      scopes: [
+        'https://www.googleapis.com/auth/spreadsheets',
+        'https://www.googleapis.com/auth/calendar'
+      ]
     });
   }
+  return auth;
+}
+
+function getSheetsClient() {
+  const auth = getGoogleAuth();
   return google.sheets({ version: 'v4', auth });
+}
+
+function getCalendarClient() {
+  const auth = getGoogleAuth();
+  return google.calendar({ version: 'v3', auth });
+}
+
+// Function to automatically sync class to Google Calendar
+async function createCalendarEvent({ dateStr, timeStr, center, course, subject, faculty }) {
+  const calendarId = process.env.GOOGLE_CALENDAR_ID || 'primary';
+  try {
+    const calendar = getCalendarClient();
+    const dateVal = parseDateStrToVal(dateStr);
+    if (!dateVal) return null;
+
+    const startMinutes = parseStartTimeToMinutes(timeStr);
+    const startDate = new Date(dateVal);
+    startDate.setUTCHours(Math.floor(startMinutes / 60), startMinutes % 60, 0, 0);
+
+    // Default duration 2 hours
+    const endDate = new Date(startDate.getTime() + 2 * 60 * 60 * 1000);
+
+    const summary = `${course} - ${subject} (${faculty}) @ ${center}`;
+    const description = `Class Schedule: ${course} - ${subject}\nFaculty: ${faculty}\nCenter: ${center}\nTime: ${timeStr}`;
+
+    const res = await calendar.events.insert({
+      calendarId: calendarId,
+      requestBody: {
+        summary: summary,
+        location: center,
+        description: description,
+        start: {
+          dateTime: startDate.toISOString(),
+        },
+        end: {
+          dateTime: endDate.toISOString(),
+        },
+      },
+    });
+
+    return res.data;
+  } catch (err) {
+    console.error('Google Calendar Sync Error:', err.message);
+    return null;
+  }
 }
 
 // Dynamically resolve target sheet tab name and sheet ID
@@ -460,18 +516,58 @@ async function handleCreateCommand(chatId, argsStr) {
 
   const sheets = getSheetsClient();
   const sheetDetails = await resolveSheetDetails(sheets);
-  const appendRes = await sheets.spreadsheets.values.append({
+
+  // Read existing schedule rows to determine chronological insertion position
+  const readRes = await sheets.spreadsheets.values.get({
     spreadsheetId: SPREADSHEET_ID,
-    range: `'${sheetDetails.title}'!A:G`,
-    valueInputOption: 'USER_ENTERED',
-    requestBody: {
-      values: [[dateVal, timeVal, centerVal, courseVal, subjectVal, facultyVal, '']]
-    }
+    range: `'${sheetDetails.title}'!A1:G`
   });
 
-  const updatedRange = appendRes.data.updates.updatedRange;
-  const rowMatch = updatedRange.match(/(\d+)$/);
-  const newRowIndex = rowMatch ? rowMatch[1] : 'New';
+  const existingRows = readRes.data.values || [];
+  const newDateVal = parseDateStrToVal(dateVal);
+  const newTimeVal = parseStartTimeToMinutes(timeVal);
+
+  const targetRowIndex = findInsertionRowIndex(existingRows, newDateVal, newTimeVal);
+
+  if (targetRowIndex > existingRows.length) {
+    // Append at the bottom of the sheet
+    await sheets.spreadsheets.values.append({
+      spreadsheetId: SPREADSHEET_ID,
+      range: `'${sheetDetails.title}'!A:G`,
+      valueInputOption: 'USER_ENTERED',
+      requestBody: {
+        values: [[dateVal, timeVal, centerVal, courseVal, subjectVal, facultyVal, calStatus]]
+      }
+    });
+  } else {
+    // Insert a new row at targetRowIndex (convert to 0-based start/end index)
+    await sheets.spreadsheets.batchUpdate({
+      spreadsheetId: SPREADSHEET_ID,
+      requestBody: {
+        requests: [{
+          insertDimension: {
+            range: {
+              sheetId: sheetDetails.sheetId,
+              dimension: 'ROWS',
+              startIndex: targetRowIndex - 1,
+              endIndex: targetRowIndex
+            },
+            inheritFromBefore: true
+          }
+        }]
+      }
+    });
+
+    // Populate row values at targetRowIndex
+    await sheets.spreadsheets.values.update({
+      spreadsheetId: SPREADSHEET_ID,
+      range: `'${sheetDetails.title}'!A${targetRowIndex}:G${targetRowIndex}`,
+      valueInputOption: 'USER_ENTERED',
+      requestBody: {
+        values: [[dateVal, timeVal, centerVal, courseVal, subjectVal, facultyVal, calStatus]]
+      }
+    });
+  }
 
   const confirmMsg =
     `✅ *Class Created Successfully!*\n\n` +

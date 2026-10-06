@@ -174,6 +174,10 @@ function findInsertionRowIndex(existingRows, newDateVal, newTimeVal) {
   return existingRows.length + 1; // Append at end if after all existing dates
 }
 
+function createScheduleRowValues({ date, time, center, course, subject, faculty }, calendarEventId = '') {
+  return [date, time, center, course, subject, faculty, '', calendarEventId];
+}
+
 function parseCreateArgs(argsStr) {
   if (!argsStr) return null;
 
@@ -629,7 +633,7 @@ async function handleCreateCommand(chatId, argsStr) {
   const { date: dateVal, time: timeVal, center: centerVal, course: courseVal, subject: subjectVal, faculty: facultyVal } = parsed;
 
   // 1. Sync to Google Calendar
-  let calStatus = '';
+  let calendarEventId = '';
   let calSyncText = '⏳ Pending';
   try {
     const calResult = await createCalendarEvent({
@@ -642,7 +646,7 @@ async function handleCreateCommand(chatId, argsStr) {
     });
 
     if (calResult) {
-      calStatus = 'CALENDAR_SYNCED';
+      calendarEventId = calResult.iCalUID || '';
       calSyncText = '✅ Synced to Google Calendar';
     }
   } catch (err) {
@@ -655,7 +659,7 @@ async function handleCreateCommand(chatId, argsStr) {
   // Read existing schedule rows to determine chronological insertion position
   const readRes = await sheets.spreadsheets.values.get({
     spreadsheetId: SPREADSHEET_ID,
-    range: `'${sheetDetails.title}'!A1:G`
+    range: `'${sheetDetails.title}'!A1:H`
   });
 
   const existingRows = readRes.data.values || [];
@@ -668,10 +672,10 @@ async function handleCreateCommand(chatId, argsStr) {
     // Append at the bottom of the sheet
     await sheets.spreadsheets.values.append({
       spreadsheetId: SPREADSHEET_ID,
-      range: `'${sheetDetails.title}'!A:G`,
+      range: `'${sheetDetails.title}'!A:H`,
       valueInputOption: 'USER_ENTERED',
       requestBody: {
-        values: [[dateVal, timeVal, centerVal, courseVal, subjectVal, facultyVal, calStatus]]
+        values: [createScheduleRowValues(parsed, calendarEventId)]
       }
     });
   } else {
@@ -696,10 +700,10 @@ async function handleCreateCommand(chatId, argsStr) {
     // Populate row values at targetRowIndex
     await sheets.spreadsheets.values.update({
       spreadsheetId: SPREADSHEET_ID,
-      range: `'${sheetDetails.title}'!A${targetRowIndex}:G${targetRowIndex}`,
+      range: `'${sheetDetails.title}'!A${targetRowIndex}:H${targetRowIndex}`,
       valueInputOption: 'USER_ENTERED',
       requestBody: {
-        values: [[dateVal, timeVal, centerVal, courseVal, subjectVal, facultyVal, calStatus]]
+        values: [createScheduleRowValues(parsed, calendarEventId)]
       }
     });
   }
@@ -847,3 +851,4 @@ module.exports._parseCreateArgs = parseCreateArgs;
 module.exports._parseDateStrToVal = parseDateStrToVal;
 module.exports._parseStartTimeToMinutes = parseStartTimeToMinutes;
 module.exports._findInsertionRowIndex = findInsertionRowIndex;
+module.exports._createScheduleRowValues = createScheduleRowValues;

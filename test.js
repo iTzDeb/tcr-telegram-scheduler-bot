@@ -25,7 +25,8 @@ const {
   _parseCreateArgs: parseCreateArgs,
   _parseDateStrToVal: parseDateStrToVal,
   _parseStartTimeToMinutes: parseStartTimeToMinutes,
-  _findInsertionRowIndex: findInsertionRowIndex
+  _findInsertionRowIndex: findInsertionRowIndex,
+  _createScheduleRowValues: createScheduleRowValues
 } = require('./api/index');
 
 console.log('Running search/filter, natural input & chronological sorting tests...');
@@ -143,5 +144,18 @@ const insertIdx25Nov = findInsertionRowIndex(
   parseStartTimeToMinutes('05:00PM - 07:00PM')
 );
 assert.strictEqual(insertIdx25Nov, 7, '25 Nov class should be appended at Row 7');
+
+// 6. Telegram-created rows keep the GAS status in G and store the Calendar event ID in H
+const scheduleRowValues = createScheduleRowValues({
+  date: '07 Oct 2026',
+  time: '03:00PM - 05:00PM',
+  center: 'Laxmi Nagar',
+  course: 'AIBE',
+  subject: 'Legal',
+  faculty: 'SHIVAM SIR'
+}, 'calendar-event-icaluid');
+assert.strictEqual(scheduleRowValues.length, 8, 'Schedule row should cover columns A-H');
+assert.strictEqual(scheduleRowValues[6], '', 'Column G should remain available for GAS SENT status');
+assert.strictEqual(scheduleRowValues[7], 'calendar-event-icaluid', 'Column H should store the Calendar event iCalUID');
 
 console.log('All search/filter, natural input & chronological sorting tests passed successfully!');

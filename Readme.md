@@ -152,15 +152,22 @@ function syncPendingClassesToCalendarAndTelegram() {
     const subjectVal = row[4];
     const facultyVal = row[5];
     const statusVal = String(row[6] || '').trim().toUpperCase();
+    const calendarEventId = String(row[7] || '').trim();
 
     // If row has valid date and status is NOT "SENT" or "CALENDAR_SYNCED"
     if (dateVal && statusVal !== "SENT" && statusVal !== "CALENDAR_SYNCED") {
 
-      // 1. Sync to Google Calendar
-      try {
-        createGoogleCalendarEvent(dateVal, timeVal, centerVal, courseVal, subjectVal, facultyVal);
-      } catch (err) {
-        Logger.log("Calendar sync error for Row " + (i + 1) + ": " + err.message);
+      // Telegram-created rows already have their Calendar event iCalUID in Column H.
+      // Avoid creating a duplicate, but still broadcast them and mark them SENT.
+      if (!calendarEventId) {
+        try {
+          const eventId = createGoogleCalendarEvent(dateVal, timeVal, centerVal, courseVal, subjectVal, facultyVal);
+          if (eventId) {
+            sheet.getRange(i + 1, 8).setValue(eventId);
+          }
+        } catch (err) {
+          Logger.log("Calendar sync error for Row " + (i + 1) + ": " + err.message);
+        }
       }
 
       // 2. Broadcast to Telegram Channel/Group
@@ -202,10 +209,11 @@ function createGoogleCalendarEvent(dateStr, timeStr, center, course, subject, fa
   // Default duration 2 hours if end time not parsed
   const endTime = new Date(startTime.getTime() + 2 * 60 * 60 * 1000);
 
-  cal.createEvent(title, startTime, endTime, {
+  const event = cal.createEvent(title, startTime, endTime, {
     location: center,
     description: description
   });
+  return event.getId();
 }
 
 function sendTelegram(chatId, text) {

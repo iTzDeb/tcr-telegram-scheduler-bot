@@ -7,12 +7,253 @@ const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '8093638286:AAHslkV
 const AUTHORIZED_CHAT_ID = process.env.AUTHORIZED_CHAT_ID || '499900380';
 const DEFAULT_SHEET_TAB = 'Schedule';
 
+// --- Utility & Date Parsing Helpers (Defined at Top Level) ---
+
+function normalizeText(text) {
+  if (!text) return '';
+  return text
+    .toLowerCase()
+    .replace(/\bseptember\b|\bsept\b/g, 'sep')
+    .replace(/\boctober\b/g, 'oct')
+    .replace(/\bjanuary\b/g, 'jan')
+    .replace(/\bfebruary\b/g, 'feb')
+    .replace(/\bmarch\b/g, 'mar')
+    .replace(/\bapril\b/g, 'apr')
+    .replace(/\bjune\b/g, 'jun')
+    .replace(/\bjuly\b/g, 'jul')
+    .replace(/\baugust\b/g, 'aug')
+    .replace(/\bnovember\b/g, 'nov')
+    .replace(/\bdecember\b/g, 'dec')
+    // Strip leading zeros from day numbers / numeric tokens (e.g., "01" -> "1", "06" -> "6")
+    .replace(/\b0([1-9])\b/g, '$1');
+}
+
+function matchesFilter(dateStr, fullRowText, filterText) {
+  const normDate = normalizeText(dateStr);
+  const normFilter = normalizeText(filterText);
+  if (!normFilter) return true;
+
+  const tokens = normFilter.split(/\s+/).filter(Boolean);
+  const monthTokens = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'];
+  const hasMonthToken = tokens.some(t => monthTokens.includes(t));
+
+  // If filter contains month name (e.g. "oct"), match date strictly against dateStr
+  if (hasMonthToken) {
+    return tokens.every(token => {
+      const escaped = token.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&');
+      const regex = new RegExp('\\b' + escaped + '\\b', 'i');
+      return regex.test(normDate);
+    });
+  }
+
+  // General query (e.g. "Laxmi Nagar" or "CLAT")
+  const normRow = normalizeText(fullRowText);
+  if (normRow.includes(normFilter)) return true;
+
+  return tokens.every(token => {
+    const escaped = token.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&');
+    if (/^[a-z0-9]+$/i.test(token)) {
+      const regex = new RegExp('\\b' + escaped + '\\b', 'i');
+      return regex.test(normRow);
+    }
+    return normRow.includes(token);
+  });
+}
+
+function parseDateStrToVal(dateStr) {
+  if (!dateStr) return 0;
+  // Clean string and strip ordinal suffixes like 1st, 2nd, 3rd, 4th
+  const str = String(dateStr).trim().toLowerCase().replace(/(\d+)(st|nd|rd|th)/g, '$1');
+  const months = {
+    jan: 0, january: 0,
+    feb: 1, february: 1,
+    mar: 2, march: 2,
+    apr: 3, april: 3,
+    may: 4,
+    jun: 5, june: 5,
+    jul: 6, july: 6,
+    aug: 7, august: 7,
+    sep: 8, sept: 8, september: 8,
+    oct: 9, october: 9,
+    nov: 10, november: 10,
+    dec: 11, december: 11
+  };
+
+  const defaultYear = new Date().getFullYear();
+
+  // Pattern 1: "06 Sept 2026", "6 Oct", "1 Oct 2026"
+  const dayMonthMatch = str.match(/^(\d{1,2})\s+([a-z]+)(?:\s+(\d{2,4}))?$/i);
+  if (dayMonthMatch) {
+    const day = parseInt(dayMonthMatch[1], 10);
+    const mStr = dayMonthMatch[2].toLowerCase();
+    let year = dayMonthMatch[3] ? parseInt(dayMonthMatch[3], 10) : defaultYear;
+    if (year < 100) year += 2000;
+    if (months[mStr] !== undefined) {
+      return new Date(Date.UTC(year, months[mStr], day)).getTime();
+    }
+  }
+
+  // Pattern 2: "Sept 06 2026", "Oct 6"
+  const monthDayMatch = str.match(/^([a-z]+)\s+(\d{1,2})(?:\s+(\d{2,4}))?$/i);
+  if (monthDayMatch) {
+    const mStr = monthDayMatch[1].toLowerCase();
+    const day = parseInt(monthDayMatch[2], 10);
+    let year = monthDayMatch[3] ? parseInt(monthDayMatch[3], 10) : defaultYear;
+    if (year < 100) year += 2000;
+    if (months[mStr] !== undefined) {
+      return new Date(Date.UTC(year, months[mStr], day)).getTime();
+    }
+  }
+
+  // Pattern 3: Slash / Dash / Dot formats like "01/10/2026", "06/09", "2026-10-01"
+  const parts = str.split(/[\/\-\.]/);
+  if (parts.length >= 2) {
+    if (parts[0].length === 4) {
+      // YYYY-MM-DD
+      const year = parseInt(parts[0], 10);
+      const month = parseInt(parts[1], 10) - 1;
+      const day = parseInt(parts[2], 10);
+      return new Date(Date.UTC(year, month, day)).getTime();
+    } else {
+      // DD/MM/YYYY or DD/MM
+      const day = parseInt(parts[0], 10);
+      const month = parseInt(parts[1], 10) - 1;
+      let year = parts[2] ? parseInt(parts[2], 10) : defaultYear;
+      if (year < 100) year += 2000;
+      if (!isNaN(day) && !isNaN(month)) {
+        return new Date(Date.UTC(year, month, day)).getTime();
+      }
+    }
+  }
+
+  const d = new Date(str);
+  return isNaN(d.getTime()) ? 0 : d.getTime();
+}
+
+function parseStartTimeToMinutes(timeStr) {
+  if (!timeStr) return 0;
+  const str = String(timeStr).trim().toLowerCase();
+  const match = str.match(/(\d{1,2})(?::(\d{2}))?\s*(am|pm)?/i);
+  if (!match) return 0;
+
+  let hours = parseInt(match[1], 10);
+  const minutes = match[2] ? parseInt(match[2], 10) : 0;
+  let ampm = match[3] ? match[3].toLowerCase() : null;
+
+  if (!ampm) {
+    if (str.includes('pm')) ampm = 'pm';
+    else if (str.includes('am')) ampm = 'am';
+  }
+
+  if (ampm === 'pm' && hours < 12) hours += 12;
+  if (ampm === 'am' && hours === 12) hours = 0;
+
+  return hours * 60 + minutes;
+}
+
+function findInsertionRowIndex(existingRows, newDateVal, newTimeVal) {
+  if (!newDateVal) return existingRows.length + 1; // Append at end if date unparseable
+
+  for (let i = 1; i < existingRows.length; i++) {
+    const row = existingRows[i];
+    const rDateStr = String(row[0] || '').trim();
+    if (!rDateStr) continue;
+
+    const rDateVal = parseDateStrToVal(rDateStr);
+    if (!rDateVal) continue;
+
+    const rTimeVal = parseStartTimeToMinutes(String(row[1] || ''));
+
+    if (rDateVal > newDateVal) {
+      return i + 1; // 1-based row index for Google Sheets
+    } else if (rDateVal === newDateVal && rTimeVal > newTimeVal) {
+      return i + 1;
+    }
+  }
+
+  return existingRows.length + 1; // Append at end if after all existing dates
+}
+
+function parseCreateArgs(argsStr) {
+  if (!argsStr) return null;
+
+  // 1. Pipe separated
+  if (argsStr.includes('|')) {
+    const parts = argsStr.split('|').map(s => s.trim());
+    if (parts.length >= 6) {
+      return {
+        date: parts[0],
+        time: parts[1],
+        center: parts[2],
+        course: parts[3],
+        subject: parts[4],
+        faculty: parts[5]
+      };
+    }
+  }
+
+  // 2. Multi-line (newlines)
+  if (argsStr.includes('\n')) {
+    const lines = argsStr.split('\n').map(s => s.trim()).filter(Boolean);
+
+    // Check Key-Value syntax (e.g. "Date: 06 Sept 2026")
+    const kv = {};
+    lines.forEach(line => {
+      const idx = line.indexOf(':');
+      if (idx !== -1) {
+        const key = line.substring(0, idx).trim().toLowerCase();
+        const val = line.substring(idx + 1).trim();
+        kv[key] = val;
+      }
+    });
+
+    if (kv.date || kv.time || kv.center || kv.course || kv.subject || kv.faculty) {
+      return {
+        date: kv.date || kv.dt || '',
+        time: kv.time || kv.tm || '',
+        center: kv.center || kv.centre || kv.loc || kv.location || '',
+        course: kv.course || kv.batch || '',
+        subject: kv.subject || kv.sub || '',
+        faculty: kv.faculty || kv.teacher || kv.sir || kv.maam || ''
+      };
+    }
+
+    if (lines.length >= 6) {
+      return {
+        date: lines[0],
+        time: lines[1],
+        center: lines[2],
+        course: lines[3],
+        subject: lines[4],
+        faculty: lines[5]
+      };
+    }
+  }
+
+  // 3. Comma separated
+  if (argsStr.includes(',')) {
+    const parts = argsStr.split(',').map(s => s.trim());
+    if (parts.length >= 6) {
+      return {
+        date: parts[0],
+        time: parts[1],
+        center: parts[2],
+        course: parts[3],
+        subject: parts[4],
+        faculty: parts[5]
+      };
+    }
+  }
+
+  return null;
+}
+
 // Helper to authenticate with Google Auth (Sheets & Calendar)
 function getGoogleAuth() {
   let auth;
   if (process.env.GOOGLE_SERVICE_ACCOUNT_KEY) {
     let rawKey = process.env.GOOGLE_SERVICE_ACCOUNT_KEY.trim();
-    
+
     // Step 1: Base64 decode if passed as base64 string
     if (!rawKey.startsWith('{') && !rawKey.startsWith('"') && !rawKey.startsWith("'")) {
       try {
@@ -118,10 +359,10 @@ async function resolveSheetDetails(sheets) {
   try {
     const spreadsheet = await sheets.spreadsheets.get({ spreadsheetId: SPREADSHEET_ID });
     const sheetList = spreadsheet.data.sheets || [];
-    
+
     // Match 'Schedule' or fallback to first sheet tab
     const matchedSheet = sheetList.find(s => s.properties.title.trim().toLowerCase() === DEFAULT_SHEET_TAB.toLowerCase()) || sheetList[0];
-    
+
     return {
       title: matchedSheet.properties.title,
       sheetId: matchedSheet.properties.sheetId
@@ -167,133 +408,6 @@ function isAuthorized(chatId, userId) {
   const strChatId = String(chatId);
   const strUserId = String(userId || '');
   return strChatId === String(AUTHORIZED_CHAT_ID) || strUserId === String(AUTHORIZED_CHAT_ID);
-}
-
-// Helper to normalize search/filter text and row data for fuzzy date and boundary matching
-function normalizeText(text) {
-  if (!text) return '';
-  return text
-    .toLowerCase()
-    .replace(/\bseptember\b|\bsept\b/g, 'sep')
-    .replace(/\boctober\b/g, 'oct')
-    .replace(/\bjanuary\b/g, 'jan')
-    .replace(/\bfebruary\b/g, 'feb')
-    .replace(/\bmarch\b/g, 'mar')
-    .replace(/\bapril\b/g, 'apr')
-    .replace(/\bjune\b/g, 'jun')
-    .replace(/\bjuly\b/g, 'jul')
-    .replace(/\baugust\b/g, 'aug')
-    .replace(/\bnovember\b/g, 'nov')
-    .replace(/\bdecember\b/g, 'dec')
-    // Strip leading zeros from day numbers / numeric tokens (e.g., "01" -> "1", "06" -> "6")
-    .replace(/\b0([1-9])\b/g, '$1');
-}
-
-function matchesFilter(dateStr, fullRowText, filterText) {
-  const normDate = normalizeText(dateStr);
-  const normFilter = normalizeText(filterText);
-  if (!normFilter) return true;
-
-  const tokens = normFilter.split(/\s+/).filter(Boolean);
-  const monthTokens = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'];
-  const hasMonthToken = tokens.some(t => monthTokens.includes(t));
-
-  // If filter contains month name (e.g. "oct"), match date strictly against dateStr
-  if (hasMonthToken) {
-    return tokens.every(token => {
-      const escaped = token.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&');
-      const regex = new RegExp('\\b' + escaped + '\\b', 'i');
-      return regex.test(normDate);
-    });
-  }
-
-  // General query (e.g. "Laxmi Nagar" or "CLAT")
-  const normRow = normalizeText(fullRowText);
-  if (normRow.includes(normFilter)) return true;
-
-  return tokens.every(token => {
-    const escaped = token.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&');
-    if (/^[a-z0-9]+$/i.test(token)) {
-      const regex = new RegExp('\\b' + escaped + '\\b', 'i');
-      return regex.test(normRow);
-    }
-    return normRow.includes(token);
-  });
-}
-
-// Helper to parse flexible create input (pipe, comma, newline, key-value)
-function parseCreateArgs(argsStr) {
-  if (!argsStr) return null;
-
-  // 1. Pipe separated
-  if (argsStr.includes('|')) {
-    const parts = argsStr.split('|').map(s => s.trim());
-    if (parts.length >= 6) {
-      return {
-        date: parts[0],
-        time: parts[1],
-        center: parts[2],
-        course: parts[3],
-        subject: parts[4],
-        faculty: parts[5]
-      };
-    }
-  }
-
-  // 2. Multi-line (newlines)
-  if (argsStr.includes('\n')) {
-    const lines = argsStr.split('\n').map(s => s.trim()).filter(Boolean);
-
-    // Check Key-Value syntax (e.g. "Date: 06 Sept 2026")
-    const kv = {};
-    lines.forEach(line => {
-      const idx = line.indexOf(':');
-      if (idx !== -1) {
-        const key = line.substring(0, idx).trim().toLowerCase();
-        const val = line.substring(idx + 1).trim();
-        kv[key] = val;
-      }
-    });
-
-    if (kv.date || kv.time || kv.center || kv.course || kv.subject || kv.faculty) {
-      return {
-        date: kv.date || kv.dt || '',
-        time: kv.time || kv.tm || '',
-        center: kv.center || kv.centre || kv.loc || kv.location || '',
-        course: kv.course || kv.batch || '',
-        subject: kv.subject || kv.sub || '',
-        faculty: kv.faculty || kv.teacher || kv.sir || kv.maam || ''
-      };
-    }
-
-    if (lines.length >= 6) {
-      return {
-        date: lines[0],
-        time: lines[1],
-        center: lines[2],
-        course: lines[3],
-        subject: lines[4],
-        faculty: lines[5]
-      };
-    }
-  }
-
-  // 3. Comma separated
-  if (argsStr.includes(',')) {
-    const parts = argsStr.split(',').map(s => s.trim());
-    if (parts.length >= 6) {
-      return {
-        date: parts[0],
-        time: parts[1],
-        center: parts[2],
-        course: parts[3],
-        subject: parts[4],
-        faculty: parts[5]
-      };
-    }
-  }
-
-  return null;
 }
 
 // Vercel Serverless Entry Point
@@ -345,7 +459,7 @@ async function handleTelegramCommand(chatId, text) {
       `• \`/list 4 Oct 2026\` - List classes for date\n` +
       `• \`/list Laxmi Nagar\` - List classes by center\n\n` +
       `📌 */create* _Class Details_\n` +
-      `Add a new class row. Flexible formats supported:\n\n` +
+      `Add a new class row chronologically. Flexible formats supported:\n\n` +
       `• *Comma / Pipe / Newline:* \n` +
       `  \`/create 06 Sept 2026, 4:00 - 6:00PM, Laxmi Nagar, CLAT, Legal, Shivam Sir\`\n\n` +
       `• *Key-Value:* \n` +
@@ -514,6 +628,27 @@ async function handleCreateCommand(chatId, argsStr) {
 
   const { date: dateVal, time: timeVal, center: centerVal, course: courseVal, subject: subjectVal, faculty: facultyVal } = parsed;
 
+  // 1. Sync to Google Calendar
+  let calStatus = '';
+  let calSyncText = '⏳ Pending';
+  try {
+    const calResult = await createCalendarEvent({
+      dateStr: dateVal,
+      timeStr: timeVal,
+      center: centerVal,
+      course: courseVal,
+      subject: subjectVal,
+      faculty: facultyVal
+    });
+
+    if (calResult) {
+      calStatus = 'CALENDAR_SYNCED';
+      calSyncText = '✅ Synced to Google Calendar';
+    }
+  } catch (err) {
+    console.error('Calendar auto-sync error:', err.message);
+  }
+
   const sheets = getSheetsClient();
   const sheetDetails = await resolveSheetDetails(sheets);
 
@@ -570,13 +705,14 @@ async function handleCreateCommand(chatId, argsStr) {
   }
 
   const confirmMsg =
-    `✅ *Class Created Successfully!*\n\n` +
-    `📍 *Row:* ${newRowIndex}\n` +
+    `✅ *Class Created Successfully! (Sorted Chronologically)*\n\n` +
+    `📍 *Row:* ${targetRowIndex}\n` +
     `🗓 *Date:* ${dateVal}\n` +
     `⏰ *Time:* ${timeVal}\n` +
     `🏛 *Center:* ${centerVal}\n` +
     `📚 *Course:* ${courseVal} - ${subjectVal}\n` +
-    `👨‍🏫 *Faculty:* ${facultyVal}`;
+    `👨‍🏫 *Faculty:* ${facultyVal}\n` +
+    `📅 *Calendar:* ${calSyncText}`;
 
   await sendTelegramMessage(chatId, confirmMsg);
 }
@@ -708,3 +844,6 @@ async function handleDeleteCommand(chatId, argsStr) {
 module.exports._normalizeText = normalizeText;
 module.exports._matchesFilter = matchesFilter;
 module.exports._parseCreateArgs = parseCreateArgs;
+module.exports._parseDateStrToVal = parseDateStrToVal;
+module.exports._parseStartTimeToMinutes = parseStartTimeToMinutes;
+module.exports._findInsertionRowIndex = findInsertionRowIndex;
